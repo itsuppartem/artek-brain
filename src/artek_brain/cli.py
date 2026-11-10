@@ -64,6 +64,74 @@ def _print_text(command: str, data: Any) -> None:
     if isinstance(data, str):
         print(data)
         return
+    if command == "quality" and isinstance(data, dict):
+        action = data.get("action")
+        if action == "report":
+            print(f"документов: {data.get('documents', 0)}")
+            print(
+                f"покрытие refs: {data.get('with_refs', 0)} "
+                f"({data.get('coverage', 0):.2%})"
+            )
+            print(
+                f"просрочено review_by: {data.get('overdue', 0)} "
+                f"({data.get('freshness_overdue', 0):.2%})"
+            )
+            print(f"stale: {data.get('stale', 0)}")
+            print(f"открытая очередь ревью: {data.get('review_queue_open', 0)}")
+            return
+        if action == "drift":
+            items = data.get("items", [])
+            print(f"дрифт: {len(items)}")
+            for item in items:
+                print(
+                    f"- {item['doc']} v{item['version']}: {item['ref']} "
+                    f"({item['reason']}, было {item['expected']}, "
+                    f"стало {item.get('actual') or 'нет'})"
+                )
+            for item in data.get("marked", []):
+                print(f"  stale: {item['path']} v{item['version']}")
+            return
+        if action == "dups":
+            print(f"похожих пар: {len(data.get('pairs', []))}")
+            for pair in data.get("pairs", []):
+                print(
+                    f"- {pair['path_a']} ~ {pair['path_b']} "
+                    f"({pair['score']:.3f})"
+                )
+            return
+        if action == "contradictions":
+            items = data.get("items", [])
+            print(f"противоречий: {len(items)}")
+            for item in items:
+                where_a = item["path_a"] + (
+                    f":{item['line_a']}" if item.get("line_a") else ""
+                )
+                where_b = item["path_b"] + (
+                    f":{item['line_b']}" if item.get("line_b") else ""
+                )
+                print(
+                    f"- {item['key']}: {item['value_a']} ({where_a}) "
+                    f"!= {item['value_b']} ({where_b})"
+                )
+            return
+        if action == "queue":
+            if "item" in data:
+                item = data["item"]
+                print(
+                    f"#{item['id']} {item['status']}: {item['ref']} "
+                    f"({item['reason']})"
+                )
+                return
+            items = data.get("items", [])
+            print(f"записей в очереди: {len(items)}")
+            for item in items:
+                print(
+                    f"#{item['id']} [{item['status']}] {item['ref']} "
+                    f"{item['reason']}: {item['detail']}"
+                )
+            return
+        _print_json(data)
+        return
     if command == "read" and isinstance(data, dict):
         print(data.get("content", ""), end="")
         return
@@ -274,6 +342,40 @@ def _parser() -> argparse.ArgumentParser:
     audit.add_argument("--since", default=None)
 
     add("stats", "статистика хранилища")
+
+    quality = add("quality", "качество знаний: отчёты, drift, дубли, противоречия, очередь")
+    quality_sub = quality.add_subparsers(dest="quality_command", required=True)
+    q_report = quality_sub.add_parser("report", help="метрики качества")
+    _add_common(q_report)
+    q_report.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
+    q_drift = quality_sub.add_parser("drift", help="привязки refs к файлам репозитория")
+    _add_common(q_drift)
+    q_drift.add_argument("--repo", default=".", help="Корень git-репозитория с кодом.")
+    q_drift.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
+    q_drift.add_argument("--mark-stale", action="store_true", help="Пометить документы stale.")
+    q_dups = quality_sub.add_parser("dups", help="похожие документы (Jaccard)")
+    _add_common(q_dups)
+    q_dups.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
+    q_dups.add_argument("--threshold", type=float, default=None)
+    q_dups.add_argument("--limit", type=int, default=100)
+    q_contra = quality_sub.add_parser("contradictions", help="противоречия в знаниях")
+    _add_common(q_contra)
+    q_contra.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
+    q_contra.add_argument("--limit", type=int, default=200)
+    q_queue = quality_sub.add_parser("queue", help="очередь ревью")
+    _add_common(q_queue)
+    q_queue.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "sync", "approve", "reject", "defer"],
+    )
+    q_queue.add_argument("--id", dest="item_id", type=int, default=None)
+    q_queue.add_argument("--note", default="")
+    q_queue.add_argument("--until", default=None, help="Дата ISO для defer.")
+    q_queue.add_argument("--status", default="open")
+    q_queue.add_argument("--prefix", default="")
+    q_queue.add_argument("--limit", type=int, default=100)
 
     task = add("task", "операции доски задач")
     task.add_argument("action", help="create, list, show, claim, start, ...")
@@ -545,6 +647,8 @@ def _run(args: argparse.Namespace) -> Any:
             )
         if command == "stats":
             return service.stats(token)
+        if command == "quality":
+            return _quality(service, token, args)
         if command == "task":
             return service.task(token, args.action, **_task_params(args))
         if command == "inbox":
@@ -577,6 +681,70 @@ def _run(args: argparse.Namespace) -> Any:
         raise ArtekBrainError(f"Неизвестная команда «{command}».")
     finally:
         service.close()
+
+
+def _quality(service: Service, token: str | None, args: argparse.Namespace) -> Any:
+    """Выполнить подкоманду quality и вернуть JSON-совместимые данные."""
+    from .drift import Drift
+    from .quality import Quality
+    from .review_queue import ReviewQueue
+
+    quality = Quality(service.brain)
+    action = args.quality_command
+    if action == "report":
+        return {"action": "report", **quality.report(token or "", args.prefix)}
+    if action == "drift":
+        drift = Drift(service.brain, args.repo)
+        items = drift.check(token or "", prefix=args.prefix)
+        marked = (
+            drift.mark_stale(token or "", items=items)
+            if args.mark_stale
+            else []
+        )
+        return {
+            "action": "drift",
+            "items": [item.as_dict() for item in items],
+            "marked": [item.as_dict() for item in marked],
+        }
+    if action == "dups":
+        pairs = quality.duplicates(
+            token or "",
+            prefix=args.prefix,
+            threshold=args.threshold,
+            limit=args.limit,
+        )
+        return {
+            "action": "dups",
+            "threshold": quality.threshold if args.threshold is None else args.threshold,
+            "pairs": [item.as_dict() for item in pairs],
+        }
+    if action == "contradictions":
+        items = quality.contradictions(
+            token or "", prefix=args.prefix, limit=args.limit
+        )
+        return {
+            "action": "contradictions",
+            "items": [item.as_dict() for item in items],
+        }
+    queue = ReviewQueue(service.store, service.access)
+    if args.action in ("list", "sync"):
+        added = queue.sync(service.brain, token or "", prefix=args.prefix)
+        if args.action == "sync":
+            return {"action": "queue", "added": [item.as_dict() for item in added]}
+        items = queue.list(token, status=args.status, limit=args.limit)
+        return {"action": "queue", "items": [item.as_dict() for item in items]}
+    if args.item_id is None:
+        raise ArtekBrainError(
+            "Не указан id записи очереди.",
+            hint="Передайте --id из brain quality queue list.",
+        )
+    if args.action == "approve":
+        item = queue.approve(token or "", args.item_id, args.note)
+    elif args.action == "reject":
+        item = queue.reject(token or "", args.item_id, args.note)
+    else:
+        item = queue.defer(token or "", args.item_id, args.note, args.until)
+    return {"action": "queue", "item": item.as_dict()}
 
 
 def _json_issued(issued: Any) -> dict[str, Any]:
