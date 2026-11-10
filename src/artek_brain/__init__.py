@@ -32,6 +32,7 @@ from .errors import (
     StoredDataError,
     ValidationError,
 )
+from .deltas import ArchiveResult, RepackResult
 from .evidence import EvidenceChecker, EvidenceError, EvidenceReport, parse_evidence
 from .frontmatter import Frontmatter
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
@@ -217,6 +218,8 @@ __all__ = [
     "RollbackSkipped",
     "AuditEntry",
     "GcResult",
+    "RepackResult",
+    "ArchiveResult",
     "ArtekBrainError",
     "ValidationError",
     "NotFoundError",
