@@ -1,0 +1,19 @@
+[project]
+name = "artek-brain"
+version = "0.1.0"
+description = "Общий слой памяти и инструментов для людей и агентов (без LLM в ядре)"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/artek_brain"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
