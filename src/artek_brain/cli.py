@@ -64,6 +64,74 @@ def _print_text(command: str, data: Any) -> None:
     if isinstance(data, str):
         print(data)
         return
+    if command == "quality" and isinstance(data, dict):
+        action = data.get("action")
+        if action == "report":
+            print(f"документов: {data.get('documents', 0)}")
+            print(
+                f"покрытие refs: {data.get('with_refs', 0)} "
+                f"({data.get('coverage', 0):.2%})"
+            )
+            print(
+                f"просрочено review_by: {data.get('overdue', 0)} "
+                f"({data.get('freshness_overdue', 0):.2%})"
+            )
+            print(f"stale: {data.get('stale', 0)}")
+            print(f"открытая очередь ревью: {data.get('review_queue_open', 0)}")
+            return
+        if action == "drift":
+            items = data.get("items", [])
+            print(f"дрифт: {len(items)}")
+            for item in items:
+                print(
+                    f"- {item['doc']} v{item['version']}: {item['ref']} "
+                    f"({item['reason']}, было {item['expected']}, "
+                    f"стало {item.get('actual') or 'нет'})"
+                )
+            for item in data.get("marked", []):
+                print(f"  stale: {item['path']} v{item['version']}")
+            return
+        if action == "dups":
+            print(f"похожих пар: {len(data.get('pairs', []))}")
+            for pair in data.get("pairs", []):
+                print(
+                    f"- {pair['path_a']} ~ {pair['path_b']} "
+                    f"({pair['score']:.3f})"
+                )
+            return
+        if action == "contradictions":
+            items = data.get("items", [])
+            print(f"противоречий: {len(items)}")
+            for item in items:
+                where_a = item["path_a"] + (
+                    f":{item['line_a']}" if item.get("line_a") else ""
+                )
+                where_b = item["path_b"] + (
+                    f":{item['line_b']}" if item.get("line_b") else ""
+                )
+                print(
+                    f"- {item['key']}: {item['value_a']} ({where_a}) "
+                    f"!= {item['value_b']} ({where_b})"
+                )
+            return
+        if action == "queue":
+            if "item" in data:
+                item = data["item"]
+                print(
+                    f"#{item['id']} {item['status']}: {item['ref']} "
+                    f"({item['reason']})"
+                )
+                return
+            items = data.get("items", [])
+            print(f"записей в очереди: {len(items)}")
+            for item in items:
+                print(
+                    f"#{item['id']} [{item['status']}] {item['ref']} "
+                    f"{item['reason']}: {item['detail']}"
+                )
+            return
+        _print_json(data)
+        return
     if command == "read" and isinstance(data, dict):
         print(data.get("content", ""), end="")
         return
@@ -181,6 +249,15 @@ def _parser() -> argparse.ArgumentParser:
     revoke.add_argument("--id", type=int, default=None, help="id токена.")
     revoke.add_argument("--value", default=None, help="Значение токена.")
     revoke.add_argument("--name", default=None, help="Отозвать все токены с именем.")
+    for action, text in (
+        ("suspend", "приостановить токен"),
+        ("resume", "снять приостановку токена"),
+    ):
+        item = token_sub.add_parser(action, help=text)
+        _add_common(item)
+        item.add_argument("--id", type=int, default=None, help="id токена.")
+        item.add_argument("--value", default=None, help="Значение токена.")
+        item.add_argument("--name", default=None, help="Имя токена.")
     token_list = token_sub.add_parser("list", help="список токенов")
     _add_common(token_list)
 
@@ -255,6 +332,17 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--limit", type=int, default=20)
     search.add_argument("--offset", type=int, default=0)
     search.add_argument("--history", action="store_true", help="Искать по всем версиям.")
+    search.add_argument(
+        "--semantic",
+        action="store_true",
+        help="Гибридный поиск: FTS + семантика (RRF).",
+    )
+    search.add_argument(
+        "--mode",
+        choices=["fts", "semantic", "hybrid"],
+        default=None,
+        help="Режим поиска: fts, semantic или hybrid.",
+    )
 
     links = add("links", "исходящие ссылки")
     links.add_argument("path")
@@ -286,6 +374,40 @@ def _parser() -> argparse.ArgumentParser:
     disk_report = add("disk-report", "отчёт о месте на диске")
     disk_report.add_argument("--days", type=int, default=30)
     disk_report.add_argument("--forecast-days", dest="forecast_days", type=int, default=30)
+
+    quality = add("quality", "качество знаний: отчёты, drift, дубли, противоречия, очередь")
+    quality_sub = quality.add_subparsers(dest="quality_command", required=True)
+    q_report = quality_sub.add_parser("report", help="метрики качества")
+    _add_common(q_report)
+    q_report.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
+    q_drift = quality_sub.add_parser("drift", help="привязки refs к файлам репозитория")
+    _add_common(q_drift)
+    q_drift.add_argument("--repo", default=".", help="Корень git-репозитория с кодом.")
+    q_drift.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
+    q_drift.add_argument("--mark-stale", action="store_true", help="Пометить документы stale.")
+    q_dups = quality_sub.add_parser("dups", help="похожие документы (Jaccard)")
+    _add_common(q_dups)
+    q_dups.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
+    q_dups.add_argument("--threshold", type=float, default=None)
+    q_dups.add_argument("--limit", type=int, default=100)
+    q_contra = quality_sub.add_parser("contradictions", help="противоречия в знаниях")
+    _add_common(q_contra)
+    q_contra.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
+    q_contra.add_argument("--limit", type=int, default=200)
+    q_queue = quality_sub.add_parser("queue", help="очередь ревью")
+    _add_common(q_queue)
+    q_queue.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "sync", "approve", "reject", "defer"],
+    )
+    q_queue.add_argument("--id", dest="item_id", type=int, default=None)
+    q_queue.add_argument("--note", default="")
+    q_queue.add_argument("--until", default=None, help="Дата ISO для defer.")
+    q_queue.add_argument("--status", default="open")
+    q_queue.add_argument("--prefix", default="")
+    q_queue.add_argument("--limit", type=int, default=100)
 
     task = add("task", "операции доски задач")
     task.add_argument("action", help="create, list, show, claim, start, ...")
@@ -337,6 +459,50 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--output", default=None)
     export.add_argument("--session", default=None)
     export.add_argument("--model", default=None)
+
+    proposal = add("proposal", "предложения агентов и утверждение")
+    proposal_sub = proposal.add_subparsers(dest="proposal_command", required=True)
+    proposal_list = proposal_sub.add_parser("list", help="список предложений")
+    _add_common(proposal_list)
+    proposal_list.add_argument("--status", default=None, choices=["pending", "approved", "rejected"])
+    proposal_show = proposal_sub.add_parser("show", help="показать предложение")
+    _add_common(proposal_show)
+    proposal_show.add_argument("path")
+    proposal_approve = proposal_sub.add_parser("approve", help="утвердить предложение")
+    _add_common(proposal_approve)
+    proposal_approve.add_argument("path")
+    proposal_approve.add_argument("--to", dest="to", default=None, help="Целевой защищённый путь.")
+    proposal_approve.add_argument("--reason", default=None)
+    proposal_reject = proposal_sub.add_parser("reject", help="отклонить предложение")
+    _add_common(proposal_reject)
+    proposal_reject.add_argument("path")
+    proposal_reject.add_argument("--reason", default=None)
+    proposal_verify = proposal_sub.add_parser("verify", help="проверить дрейф approved/")
+    _add_common(proposal_verify)
+
+    run = add("run", "серверный прогон проверки по задаче")
+    run.add_argument("task", help="id задачи.")
+    run.add_argument(
+        "--command", dest="check_command", default=None, help="Команда проверки."
+    )
+    run.add_argument("--seeds", type=int, default=None)
+    run.add_argument("--timeout", type=float, default=None)
+    run.add_argument("--workdir", default=None)
+    run.add_argument("--hidden-command", dest="hidden_command", default=None)
+    run.add_argument("--list", dest="list_runs", action="store_true", help="Показать прогоны.")
+    run.add_argument("--limit", type=int, default=50)
+
+    anomaly = add("anomaly", "детекторы аномалий")
+    anomaly_sub = anomaly.add_subparsers(dest="anomaly_command", required=True)
+    anomaly_scan = anomaly_sub.add_parser("scan", help="найти аномалии")
+    _add_common(anomaly_scan)
+    anomaly_scan.add_argument("--auto-suspend", dest="auto_suspend", action="store_true", default=None)
+    anomaly_scan.add_argument("--no-auto-suspend", dest="auto_suspend", action="store_false")
+    anomaly_list = anomaly_sub.add_parser("list", help="список инцидентов")
+    _add_common(anomaly_list)
+    anomaly_list.add_argument("--actor", default=None)
+    anomaly_list.add_argument("--kind", default=None)
+    anomaly_list.add_argument("--limit", type=int, default=100)
 
     serve = add("serve", "запустить HTTP JSON API")
     serve.add_argument("--host", default="127.0.0.1")
@@ -442,6 +608,20 @@ def _run(args: argparse.Namespace) -> Any:
                     value=args.value,
                     name=args.name,
                 )
+            if args.token_command == "suspend":
+                return service.token_suspend(
+                    token,
+                    token_id=args.id,
+                    value=args.value,
+                    name=args.name,
+                )
+            if args.token_command == "resume":
+                return service.token_resume(
+                    token,
+                    token_id=args.id,
+                    value=args.value,
+                    name=args.name,
+                )
             return service.token_list(token)
         if command in ("ls", "tree"):
             return service.ls(
@@ -527,6 +707,7 @@ def _run(args: argparse.Namespace) -> Any:
                 batch_id=args.batch_id,
             )
         if command == "search":
+            mode = args.mode or ("hybrid" if args.semantic else "fts")
             return service.search(
                 token,
                 args.query,
@@ -540,6 +721,7 @@ def _run(args: argparse.Namespace) -> Any:
                 limit=args.limit,
                 offset=args.offset,
                 history=args.history,
+                mode=mode,
             )
         if command == "links":
             return service.links(token, args.path, version=args.version)
@@ -565,6 +747,8 @@ def _run(args: argparse.Namespace) -> Any:
             return service.disk_report(
                 token, days=args.days, forecast_days=args.forecast_days
             )
+        if command == "quality":
+            return _quality(service, token, args)
         if command == "task":
             return service.task(token, args.action, **_task_params(args))
         if command == "inbox":
@@ -594,9 +778,103 @@ def _run(args: argparse.Namespace) -> Any:
                 Path(args.output).write_text(data["content"], encoding="utf-8")
                 return {"path": args.path, "output": args.output}
             return data
+        if command == "proposal":
+            return service.proposal(
+                token,
+                args.proposal_command,
+                path=getattr(args, "path", None),
+                status=getattr(args, "status", None),
+                to=getattr(args, "to", None),
+                reason=getattr(args, "reason", None),
+            )
+        if command == "run":
+            if args.list_runs:
+                return service.run_list(token, task_id=args.task, limit=args.limit)
+            return service.run(
+                token,
+                args.task,
+                command=args.check_command,
+                seeds=args.seeds,
+                timeout=args.timeout,
+                workdir=args.workdir,
+                hidden_command=args.hidden_command,
+            )
+        if command == "anomaly":
+            if args.anomaly_command == "scan":
+                return service.anomaly_scan(token, auto_suspend=args.auto_suspend)
+            return service.anomaly_list(
+                token,
+                actor=args.actor,
+                kind=args.kind,
+                limit=args.limit,
+            )
         raise ArtekBrainError(f"Неизвестная команда «{command}».")
     finally:
         service.close()
+
+
+def _quality(service: Service, token: str | None, args: argparse.Namespace) -> Any:
+    """Выполнить подкоманду quality и вернуть JSON-совместимые данные."""
+    from .drift import Drift
+    from .quality import Quality
+    from .review_queue import ReviewQueue
+
+    quality = Quality(service.brain)
+    action = args.quality_command
+    if action == "report":
+        return {"action": "report", **quality.report(token or "", args.prefix)}
+    if action == "drift":
+        drift = Drift(service.brain, args.repo)
+        items = drift.check(token or "", prefix=args.prefix)
+        marked = (
+            drift.mark_stale(token or "", items=items)
+            if args.mark_stale
+            else []
+        )
+        return {
+            "action": "drift",
+            "items": [item.as_dict() for item in items],
+            "marked": [item.as_dict() for item in marked],
+        }
+    if action == "dups":
+        pairs = quality.duplicates(
+            token or "",
+            prefix=args.prefix,
+            threshold=args.threshold,
+            limit=args.limit,
+        )
+        return {
+            "action": "dups",
+            "threshold": quality.threshold if args.threshold is None else args.threshold,
+            "pairs": [item.as_dict() for item in pairs],
+        }
+    if action == "contradictions":
+        items = quality.contradictions(
+            token or "", prefix=args.prefix, limit=args.limit
+        )
+        return {
+            "action": "contradictions",
+            "items": [item.as_dict() for item in items],
+        }
+    queue = ReviewQueue(service.store, service.access)
+    if args.action in ("list", "sync"):
+        added = queue.sync(service.brain, token or "", prefix=args.prefix)
+        if args.action == "sync":
+            return {"action": "queue", "added": [item.as_dict() for item in added]}
+        items = queue.list(token, status=args.status, limit=args.limit)
+        return {"action": "queue", "items": [item.as_dict() for item in items]}
+    if args.item_id is None:
+        raise ArtekBrainError(
+            "Не указан id записи очереди.",
+            hint="Передайте --id из brain quality queue list.",
+        )
+    if args.action == "approve":
+        item = queue.approve(token or "", args.item_id, args.note)
+    elif args.action == "reject":
+        item = queue.reject(token or "", args.item_id, args.note)
+    else:
+        item = queue.defer(token or "", args.item_id, args.note, args.until)
+    return {"action": "queue", "item": item.as_dict()}
 
 
 def _json_issued(issued: Any) -> dict[str, Any]:
