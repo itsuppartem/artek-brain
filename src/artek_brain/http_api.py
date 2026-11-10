@@ -382,6 +382,10 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
             return self._inbox(method, list(segments[1:]), query, body, token)
         if head == "brief" and method == "GET":
             return service.brief(token, limit=_qint(query, "limit") or 2000)
+        if head == "sandbox":
+            return self._sandbox(
+                method, list(segments[1:]), query, body, token
+            )
         if head == "rpc" and method == "POST":
             return self._rpc(body, token)
 
@@ -629,6 +633,38 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
             return service.inbox(token, action, **params)
         raise HttpError(404, "Inbox: GET /inbox, POST /inbox/{send,read}.")
 
+    def _sandbox(
+        self,
+        method: str,
+        rest: list[str],
+        query: dict[str, list[str]],
+        body: dict[str, Any],
+        token: str,
+    ) -> Any:
+        service = self.app.service
+        action = rest[0] if rest else "run"
+        if action == "run" and method == "POST":
+            return service.sandbox_run(
+                token,
+                _body_value(body, "script", default=""),
+                _body_value(body, "language", "lang", default="python"),
+                inputs=_body_value(body, "inputs"),
+                limits=_body_value(body, "limits"),
+                cache=bool(_body_value(body, "cache", default=False)),
+            )
+        job_id = (rest[1] if len(rest) > 1 else None) or _body_value(
+            body, "id", "job_id"
+        ) or _q1(query, "id")
+        if action == "status" and method in ("GET", "POST"):
+            return service.sandbox_status(token, job_id or "")
+        if action == "cancel" and method in ("POST", "DELETE"):
+            return service.sandbox_cancel(token, job_id or "")
+        raise HttpError(
+            404,
+            "Песочница: POST /sandbox/run, GET /sandbox/status/<id>, "
+            "POST /sandbox/cancel/<id>.",
+        )
+
     def _rpc(self, body: dict[str, Any], token: str) -> Any:
         service = self.app.service
         op = _body_value(body, "op", "method")
@@ -643,6 +679,7 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
             "search", "ls", "toc", "links", "backlinks", "broken_links",
             "changes", "readme", "audit", "stats", "who_knows", "task", "inbox",
             "brief", "token_create", "token_list", "token_revoke",
+            "sandbox_run", "sandbox_status", "sandbox_cancel",
         }
         if op not in allowed:
             raise HttpError(400, f"Неизвестная операция RPC: {op}.")
@@ -706,6 +743,17 @@ OPENAPI: dict[str, Any] = {
             "post": {"summary": "Отправить письмо"},
         },
         "/brief": {"get": {"summary": "Бриф агента"}},
+        "/sandbox/run": {
+            "post": {
+                "summary": "Выполнить скрипт в песочнице",
+                "description": (
+                    "Сеть выключена; данные — только read-only срез по inputs. "
+                    "Результат: stdout/stderr, /out, код, время, память."
+                ),
+            }
+        },
+        "/sandbox/status/{id}": {"get": {"summary": "Статус запуска"}},
+        "/sandbox/cancel/{id}": {"post": {"summary": "Отменить запуск"}},
         "/rpc": {"post": {"summary": "Вызов любой операции по имени"}},
     },
 }

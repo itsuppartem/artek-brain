@@ -38,6 +38,14 @@ from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
 from .proposals import Approval, Proposal, ProposalStore
 from .quota import Quota
 from .quality import Contradiction, DuplicatePair, Quality, SchemaResult
+from .registry import (
+    Registry,
+    ToolDisabled,
+    ToolError,
+    ToolLimitError,
+    ToolNotFound,
+    ToolSpec,
+)
 from .review_queue import (
     APPROVED as QUEUE_APPROVED,
     DEFERRED as QUEUE_DEFERRED,
@@ -49,6 +57,15 @@ from .review_queue import (
     ReviewQueue,
 )
 from .runs import AreaConfig, RunRecord, Runner
+from .sandbox import (
+    Sandbox,
+    SandboxBusy,
+    SandboxConfig,
+    SandboxError,
+    SandboxLimits,
+    SandboxNotFound,
+    SandboxUnavailable,
+)
 from .search import Search, SearchItem, SearchPage
 from .semantic import (
     CHUNK_CHARS,
@@ -116,6 +133,19 @@ __all__ = [
     "Brain",
     "Search",
     "Nav",
+    "Sandbox",
+    "SandboxConfig",
+    "SandboxLimits",
+    "SandboxError",
+    "SandboxUnavailable",
+    "SandboxBusy",
+    "SandboxNotFound",
+    "Registry",
+    "ToolSpec",
+    "ToolError",
+    "ToolNotFound",
+    "ToolDisabled",
+    "ToolLimitError",
     "SemanticIndex",
     "SemanticSettings",
     "SemanticError",
