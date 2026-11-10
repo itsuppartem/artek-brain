@@ -15,6 +15,7 @@ from .embeddings import (
     OllamaEmbedder,
     build_embedder,
 )
+from .drift import Drift, DriftItem, Ref, check_drift, mark_stale, pin
 from .errors import (
     ArtekBrainError,
     BaseVersionRequiredError,
@@ -33,6 +34,17 @@ from .errors import (
 from .frontmatter import Frontmatter
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
 from .quota import Quota
+from .quality import Contradiction, DuplicatePair, Quality, SchemaResult
+from .review_queue import (
+    APPROVED as QUEUE_APPROVED,
+    DEFERRED as QUEUE_DEFERRED,
+    DRIFT,
+    OVERDUE_REVIEW,
+    REJECTED as QUEUE_REJECTED,
+    STATUS_REVIEW,
+    QueueItem,
+    ReviewQueue,
+)
 from .search import Search, SearchItem, SearchPage
 from .semantic import (
     CHUNK_CHARS,
@@ -118,6 +130,24 @@ __all__ = [
     "hybrid_search",
     "CHUNK_CHARS",
     "PREFILTER_THRESHOLD",
+    "Quality",
+    "DuplicatePair",
+    "Contradiction",
+    "SchemaResult",
+    "Drift",
+    "DriftItem",
+    "Ref",
+    "check_drift",
+    "mark_stale",
+    "pin",
+    "ReviewQueue",
+    "QueueItem",
+    "QUEUE_APPROVED",
+    "QUEUE_REJECTED",
+    "QUEUE_DEFERRED",
+    "DRIFT",
+    "STATUS_REVIEW",
+    "OVERDUE_REVIEW",
     "Scope",
     "Principal",
     "IssuedToken",

@@ -228,6 +228,10 @@ class Service:
         model: str | None = None,
     ) -> dict[str, Any]:
         """Записать новую версию документа."""
+        from .quality import Quality
+
+        if token:
+            Quality(self.brain).strict_check(token, path, content)
         result = self.brain.write(
             token or "",
             path,
