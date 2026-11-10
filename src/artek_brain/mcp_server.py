@@ -168,6 +168,32 @@ _ACTION_HELP: dict[str, tuple[str, str, str]] = {
         "brain_task(action=\"history\", path=\"docs/a.md\")",
         "Схемы отдельных action — в brain_help(\"<action>\").",
     ),
+    "sandbox": (
+        "Песочница скриптов: python/shell выполняется изолированно (bwrap), "
+        "сеть выключена, данные — read-only срез по inputs.prefix/paths, "
+        "результат из stdout/stderr и /out. Новый стартовый MCP-инструмент "
+        "не добавлен: вызывайте через brain_task(action=\"sandbox_run\"). "
+        "CLI: brain sandbox run --lang python --paths docs/ script.py. "
+        "HTTP: POST /sandbox/run (script, language, inputs, limits, cache).",
+        "brain_task(action=\"sandbox_run\", script=\"import brainlib; print(brainlib.documents())\", language=\"python\", inputs={\"prefix\": \"docs\"})",
+        "Возвращает exit_code, stdout, stderr, out, duration_ms, peak_memory_bytes, slice.",
+    ),
+    "sandbox_run": (
+        "Запустить скрипт в песочнице. Параметры: script (текст), language, "
+        "inputs (prefix/paths), limits, cache. Нужна роль agent и выше.",
+        "brain_task(action=\"sandbox_run\", script=\"print(1)\", language=\"python\")",
+        "Возвращает stdout/stderr, out, exit_code, время и пиковую память.",
+    ),
+    "sandbox_status": (
+        "Статус запуска песочницы по id.",
+        "brain_task(action=\"sandbox_status\", job_id=\"...\")",
+        "Возвращает status и результат, если запуск завершён.",
+    ),
+    "sandbox_cancel": (
+        "Отменить запуск песочницы по id.",
+        "brain_task(action=\"sandbox_cancel\", job_id=\"...\")",
+        "Убивает группу процессов и возвращает cancelled.",
+    ),
     "history": (
         "История версий. Параметры: path (обязателен), limit=50, offset=0.",
         "brain_task(action=\"history\", path=\"docs/a.md\", limit=10)",
@@ -428,7 +454,7 @@ _MEMORY_ACTIONS = {
     "backlinks", "broken_links", "changes", "readme", "delete", "restore",
     "rollback_version", "rollback_author", "rollback_batch", "export",
     "audit", "stats", "who_knows", "brief", "token_create", "token_list",
-    "token_revoke",
+    "token_revoke", "sandbox_run", "sandbox_status", "sandbox_cancel",
 }
 
 _TASK_ACTIONS = {

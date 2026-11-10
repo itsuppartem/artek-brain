@@ -26,6 +26,23 @@ from .errors import (
 from .frontmatter import Frontmatter
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
 from .quota import Quota
+from .registry import (
+    Registry,
+    ToolDisabled,
+    ToolError,
+    ToolLimitError,
+    ToolNotFound,
+    ToolSpec,
+)
+from .sandbox import (
+    Sandbox,
+    SandboxBusy,
+    SandboxConfig,
+    SandboxError,
+    SandboxLimits,
+    SandboxNotFound,
+    SandboxUnavailable,
+)
 from .search import Search, SearchItem, SearchPage
 from .store import (
     AuditEntry,
@@ -78,6 +95,19 @@ __all__ = [
     "Brain",
     "Search",
     "Nav",
+    "Sandbox",
+    "SandboxConfig",
+    "SandboxLimits",
+    "SandboxError",
+    "SandboxUnavailable",
+    "SandboxBusy",
+    "SandboxNotFound",
+    "Registry",
+    "ToolSpec",
+    "ToolError",
+    "ToolNotFound",
+    "ToolDisabled",
+    "ToolLimitError",
     "Scope",
     "Principal",
     "IssuedToken",
