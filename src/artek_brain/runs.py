@@ -342,9 +342,20 @@ class Runner:
             code_sha = self._code_sha(copy_dir)
             finished = self._clock()
             duration_ms = int((finished - started).total_seconds() * 1000)
-            if pass_rate == 1.0 and hidden_pass_rate == 1.0:
+            if hidden_total:
+                if hidden_pass_rate == 0.0:
+                    status = "fail"
+                elif hidden_pass_rate < 1.0:
+                    status = "partial"
+                elif pass_rate == 1.0:
+                    status = "pass"
+                elif pass_rate == 0.0:
+                    status = "fail"
+                else:
+                    status = "partial"
+            elif pass_rate == 1.0:
                 status = "pass"
-            elif pass_rate == 0.0 and hidden_pass_rate == 0.0:
+            elif pass_rate == 0.0:
                 status = "fail"
             else:
                 status = "partial"
