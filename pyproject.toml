@@ -22,9 +22,9 @@ packages = ["src/artek_brain"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not slow'"
+addopts = "-m 'not load'"
 markers = [
-    "slow: нагрузочные тесты; запуск: uv run pytest -m slow",
+    "load: нагрузочные тесты; запуск: uv run pytest -m load (по одному, не параллельно)",
 ]
 
 [project.scripts]
