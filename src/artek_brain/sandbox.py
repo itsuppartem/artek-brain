@@ -32,6 +32,7 @@ from .errors import ArtekBrainError, PermissionDenied, ValidationError
 from .nav import Nav
 
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+_JOB_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 _LANGUAGES = {
     "python": ("py", "python"),
     "py": ("py", "python"),
@@ -216,8 +217,13 @@ class SandboxConfig:
 
     bwrap: str = "/usr/bin/bwrap"
     prlimit: str = "/usr/bin/prlimit"
+    systemd_run: str = "/usr/bin/systemd-run"
+    systemctl: str = "/usr/bin/systemctl"
     python: str = "/usr/bin/python3"
     shell: str = "/bin/sh"
+    sandbox_uid: int = 65534
+    sandbox_gid: int = 65534
+    tasks_headroom: int = 8
     default_limits: SandboxLimits = field(default_factory=SandboxLimits)
     role_ceilings: Mapping[str, SandboxLimits] = field(
         default_factory=lambda: {
@@ -405,6 +411,18 @@ class Sandbox:
                 f"Не найден prlimit «{self.config.prlimit}» для лимитов.",
                 hint="Установите util-linux (prlimit) или укажите путь в SandboxConfig.",
             )
+        for label, path in (
+            ("systemd-run", self.config.systemd_run),
+            ("systemctl", self.config.systemctl),
+        ):
+            if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+                raise SandboxUnavailable(
+                    f"Не найден «{label}» («{path}») для cgroup-лимитов.",
+                    hint=(
+                        "Запуск без cgroup-лимита процессов и памяти запрещён: "
+                        "установите systemd или укажите путь в SandboxConfig."
+                    ),
+                )
         interpreter = self._interpreter(language)
         if not (os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)):
             raise SandboxUnavailable(
@@ -577,6 +595,10 @@ class Sandbox:
                 selected[path] = doc
 
         directory = Path(tempfile.mkdtemp(prefix="artek-sandbox-"))
+        try:
+            directory.chmod(0o755)
+        except OSError:
+            pass
         data_dir = directory / "data"
         lib_dir = directory / "lib"
         data_dir.mkdir(mode=0o755)
@@ -585,6 +607,10 @@ class Sandbox:
             (lib_dir / "brainlib.py").write_text(
                 _BRAINLIB_SOURCE, encoding="utf-8"
             )
+            try:
+                (lib_dir / "brainlib.py").chmod(0o644)
+            except OSError:
+                pass
             result = _Slice(
                 directory=directory,
                 data_dir=data_dir,
@@ -607,6 +633,10 @@ class Sandbox:
                 target = data_dir / path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
+                try:
+                    target.chmod(0o644)
+                except OSError:
+                    pass
                 result.entries.append(
                     {
                         "path": path,
@@ -724,6 +754,7 @@ class Sandbox:
         job.created_at = time.time()
         with self._jobs_lock:
             self._jobs[job.id] = job
+        self._persist_job(job)
 
         if cache:
             with self._cache_lock:
@@ -744,6 +775,7 @@ class Sandbox:
                         job, slice_, result, limits=effective, cached=True
                     ),
                 )
+                self._persist_job(job)
                 return job.id
 
         thread = threading.Thread(
@@ -775,8 +807,24 @@ class Sandbox:
     def status(self, token: str, job_id: str) -> dict[str, Any]:
         """Состояние запуска по id (свой запуск или owner)."""
         principal = self._verify(token)
-        job = self._get_job(job_id)
-        if principal.role != "owner" and principal.id != job.token_id:
+        job = self._maybe_job(job_id)
+        if job is not None:
+            if principal.role != "owner" and principal.id != job.token_id:
+                raise PermissionDenied(
+                    "sandbox.status",
+                    job_id,
+                    "owner",
+                    actor=principal.name,
+                    reason="чужой запуск песочницы не виден",
+                )
+            return job.public()
+        payload = self._load_persisted(job_id)
+        if payload is None:
+            raise SandboxNotFound(
+                f"Запуск «{job_id}» не найден.",
+                hint="Возьмите id из результата sandbox run.",
+            )
+        if principal.role != "owner" and principal.id != payload.get("token_id"):
             raise PermissionDenied(
                 "sandbox.status",
                 job_id,
@@ -784,13 +832,45 @@ class Sandbox:
                 actor=principal.name,
                 reason="чужой запуск песочницы не виден",
             )
-        return job.public()
+        return copy.deepcopy(payload.get("job") or {})
 
     def cancel(self, token: str, job_id: str) -> dict[str, Any]:
         """Отменить запуск по id и убить всю группу процессов."""
         principal = self._verify(token)
-        job = self._get_job(job_id)
-        if principal.role != "owner" and principal.id != job.token_id:
+        job = self._maybe_job(job_id)
+        if job is not None:
+            if principal.role != "owner" and principal.id != job.token_id:
+                raise PermissionDenied(
+                    "sandbox.cancel",
+                    job_id,
+                    "owner",
+                    actor=principal.name,
+                    reason="чужой запуск песочницы нельзя отменить",
+                )
+            with self._jobs_lock:
+                if job.status in ("done", "error", "cancelled", "timeout"):
+                    return {
+                        "id": job.id,
+                        "cancelled": False,
+                        "status": job.status,
+                    }
+                job.cancel_requested = True
+                proc = job.proc
+            self._kill_scope(job.id)
+            if proc is not None:
+                _killpg(proc.pid, signal.SIGKILL)
+            return {
+                "id": job.id,
+                "cancelled": True,
+                "status": job.status,
+            }
+        payload = self._load_persisted(job_id)
+        if payload is None:
+            raise SandboxNotFound(
+                f"Запуск «{job_id}» не найден.",
+                hint="Возьмите id из результата sandbox run.",
+            )
+        if principal.role != "owner" and principal.id != payload.get("token_id"):
             raise PermissionDenied(
                 "sandbox.cancel",
                 job_id,
@@ -798,22 +878,19 @@ class Sandbox:
                 actor=principal.name,
                 reason="чужой запуск песочницы нельзя отменить",
             )
-        with self._jobs_lock:
-            if job.status in ("done", "error", "cancelled", "timeout"):
-                return {
-                    "id": job.id,
-                    "cancelled": False,
-                    "status": job.status,
-                }
-            job.cancel_requested = True
-            proc = job.proc
-        if proc is not None:
-            _killpg(proc.pid, signal.SIGKILL)
-        return {
-            "id": job.id,
-            "cancelled": True,
-            "status": job.status,
-        }
+        state = payload.get("job") or {}
+        if state.get("status") in ("done", "error", "cancelled", "timeout"):
+            return {
+                "id": job_id,
+                "cancelled": False,
+                "status": state.get("status"),
+            }
+        self._kill_scope(job_id)
+        state["cancel_requested"] = True
+        state["status"] = "cancelled"
+        state["finished_at"] = time.time()
+        self._persist_payload(job_id, payload.get("token_id"), state)
+        return {"id": job_id, "cancelled": True, "status": "cancelled"}
 
     def shutdown(self) -> None:
         """Отменить все незавершённые запуски при остановке сервера."""
@@ -824,18 +901,102 @@ class Sandbox:
                 with self._jobs_lock:
                     job.cancel_requested = True
                     proc = job.proc
+                self._kill_scope(job.id)
                 if proc is not None:
                     _killpg(proc.pid, signal.SIGKILL)
 
-    def _get_job(self, job_id: str) -> _Job:
+    def _maybe_job(self, job_id: str) -> _Job | None:
         with self._jobs_lock:
-            job = self._jobs.get(str(job_id or ""))
+            return self._jobs.get(str(job_id or ""))
+
+    def _get_job(self, job_id: str) -> _Job:
+        job = self._maybe_job(job_id)
         if job is None:
             raise SandboxNotFound(
                 f"Запуск «{job_id}» не найден.",
                 hint="Возьмите id из результата sandbox run.",
             )
         return job
+
+    # ------------------------------------------------------------------
+    # Состояние запусков между процессами (CLI/HTTP)
+    # ------------------------------------------------------------------
+    def _jobs_dir(self) -> Path | None:
+        if self.store is None:
+            return None
+        root = getattr(self.store, "root", None)
+        if root is None:
+            return None
+        path = Path(root) / "sandbox" / "jobs"
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            path.chmod(0o700)
+        except OSError:
+            return None
+        return path
+
+    def _job_path(self, job_id: str) -> Path | None:
+        if not _JOB_ID_RE.fullmatch(str(job_id or "")):
+            return None
+        directory = self._jobs_dir()
+        return None if directory is None else directory / f"{job_id}.json"
+
+    def _persist_job(self, job: _Job) -> None:
+        self._persist_payload(job.id, job.token_id, job.public())
+
+    def _persist_payload(
+        self, job_id: str, token_id: Any, state: Mapping[str, Any]
+    ) -> None:
+        path = self._job_path(job_id)
+        if path is None:
+            return
+        try:
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {"token_id": token_id, "job": dict(state)},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def _load_persisted(self, job_id: str) -> dict[str, Any] | None:
+        path = self._job_path(job_id)
+        if path is None:
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("job"), dict):
+            return None
+        return payload
+
+    def _unit_name(self, job_id: str) -> str:
+        return f"brain-sbx-{job_id}"
+
+    def _kill_scope(self, job_id: str) -> None:
+        """Убить cgroup-scope запуска целиком (в т.ч. из другого процесса)."""
+        unit = f"{self._unit_name(job_id)}.scope"
+        for action in ("kill", "stop"):
+            command = [self.config.systemctl]
+            if action == "kill":
+                command += ["kill", "--signal=KILL", unit]
+            else:
+                command += ["stop", unit]
+            try:
+                subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
 
     # ------------------------------------------------------------------
     # Выполнение
@@ -899,6 +1060,7 @@ class Sandbox:
                 job.status = "running"
                 job.started_at = time.time()
 
+            self._persist_job(job)
             script_path = self._store_script(job, script)
             job.script_path = script_path
             result = self._execute(job, script, language, limits, slice_)
@@ -920,6 +1082,7 @@ class Sandbox:
             self._log_failure(job.actor, exc)
         finally:
             job.finished_at = job.finished_at or time.time()
+            self._persist_job(job)
             if host_acquired:
                 self._host_sem.release()
             if token_acquired:
@@ -957,11 +1120,17 @@ class Sandbox:
     ) -> dict[str, Any]:
         started = time.monotonic()
         out_dir = Path(tempfile.mkdtemp(prefix="artek-out-"))
+        try:
+            out_dir.chmod(0o777)
+        except OSError:
+            pass
         tmp_size = min(
             max(16 * 1024 * 1024, limits.max_file_bytes * 2),
             128 * 1024 * 1024,
         )
-        command = self._command(language, limits, slice_, out_dir, tmp_size)
+        unit = self._unit_name(job.id)
+        command = self._command(language, limits, slice_, out_dir, tmp_size, unit)
+        parent_cgroup = _cgroup_dir(os.getpid())
         env = {
             "PATH": "/usr/bin:/bin",
             "HOME": "/tmp",
@@ -985,11 +1154,14 @@ class Sandbox:
         except OSError as exc:
             shutil.rmtree(out_dir, ignore_errors=True)
             raise SandboxUnavailable(
-                f"Не удалось запустить bwrap: {exc}.",
-                hint="Проверьте bwrap и права пользователя.",
+                f"Не удалось запустить изолированный запуск: {exc}.",
+                hint="Проверьте bwrap, systemd-run и права пользователя.",
             ) from exc
         with self._jobs_lock:
             job.proc = proc
+        cgroup = _cgroup_dir(proc.pid)
+        if cgroup == parent_cgroup:
+            cgroup = None
 
         out_buf: list[bytes] = []
         err_buf: list[bytes] = []
@@ -1028,6 +1200,11 @@ class Sandbox:
         deadline = started + float(limits.wall_seconds)
         peak_memory = 0
         reason: str | None = None
+
+        def kill_all() -> None:
+            self._kill_scope(job.id)
+            _killpg(proc.pid, signal.SIGKILL)
+
         while True:
             code = proc.poll()
             if code is not None:
@@ -1037,33 +1214,40 @@ class Sandbox:
                 cancelled = job.cancel_requested
             if cancelled:
                 reason = "cancelled"
-                _killpg(proc.pid, signal.SIGKILL)
+                kill_all()
                 break
             if now >= deadline:
                 reason = "timeout"
-                _killpg(proc.pid, signal.SIGKILL)
+                kill_all()
                 break
-            count, rss = _process_group_stats(proc.pid)
-            peak_memory = max(peak_memory, rss)
-            if count > limits.max_processes:
-                reason = "processes"
-                _killpg(proc.pid, signal.SIGKILL)
-                break
+            if cgroup is None:
+                cgroup = _cgroup_dir(proc.pid)
+                if cgroup == parent_cgroup:
+                    cgroup = None
+            if cgroup is not None:
+                count, rss = _scope_stats(cgroup)
+                peak_memory = max(peak_memory, rss)
+                if count > limits.max_processes:
+                    reason = "processes"
+                    kill_all()
+                    break
             out_size, out_files = _directory_usage(out_dir)
             if out_size > limits.max_out_bytes or out_files > limits.max_files:
                 reason = "output"
-                _killpg(proc.pid, signal.SIGKILL)
+                kill_all()
                 break
             time.sleep(max(0.005, self.config.monitor_interval_seconds))
 
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            _killpg(proc.pid, signal.SIGKILL)
+            kill_all()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        if reason is not None:
+            self._kill_scope(job.id)
         for reader in readers:
             reader.join(timeout=5)
         with self._jobs_lock:
@@ -1167,6 +1351,7 @@ class Sandbox:
         slice_: _Slice,
         out_dir: Path,
         tmp_size: int,
+        unit: str,
     ) -> list[str]:
         interpreter = self._interpreter(language)
         bwrap: list[str] = [
@@ -1174,6 +1359,8 @@ class Sandbox:
             "--unshare-all",
             "--die-with-parent",
             "--new-session",
+            "--cap-drop",
+            "ALL",
             "--ro-bind",
             "/usr",
             "/usr",
@@ -1202,10 +1389,38 @@ class Sandbox:
             str(int(tmp_size)),
             "--tmpfs",
             "/tmp",
+            "--chmod",
+            "1777",
+            "/tmp",
             "--remount-ro",
             "/",
             "--chdir",
             "/tmp",
+            "--clearenv",
+            "--setenv",
+            "PATH",
+            "/usr/bin:/bin",
+            "--setenv",
+            "HOME",
+            "/tmp",
+            "--setenv",
+            "TMPDIR",
+            "/tmp",
+            "--setenv",
+            "LANG",
+            "C.UTF-8",
+            "--setenv",
+            "LC_ALL",
+            "C.UTF-8",
+            "--setenv",
+            "PYTHONPATH",
+            "/opt/brainlib",
+            "--setenv",
+            "PYTHONDONTWRITEBYTECODE",
+            "1",
+            "--setenv",
+            "PYTHONIOENCODING",
+            "utf-8",
             "--",
             interpreter,
         ]
@@ -1213,16 +1428,39 @@ class Sandbox:
             bwrap.append("-")
         else:
             bwrap.append("-s")
+        tasks_max = int(limits.max_processes) + max(0, int(self.config.tasks_headroom))
+        scope: list[str] = [
+            self.config.systemd_run,
+            "--scope",
+            "--quiet",
+            "--collect",
+            f"--unit={unit}",
+        ]
+        if os.geteuid() == 0:
+            # host-uid без прав root: RLIMIT_NPROC реально считает процессы.
+            scope += [
+                f"--uid={int(self.config.sandbox_uid)}",
+                f"--gid={int(self.config.sandbox_gid)}",
+            ]
+        scope += [
+            "-p",
+            f"TasksMax={tasks_max}",
+            "-p",
+            f"MemoryMax={int(limits.memory_bytes)}",
+            "-p",
+            "CPUQuota=100%",
+            "--",
+        ]
         prefix = [
             self.config.prlimit,
             f"--cpu={int(limits.cpu_seconds)}",
             f"--as={int(limits.memory_bytes)}",
-            f"--nproc={int(limits.max_processes) + 8}",
+            f"--nproc={tasks_max}",
             f"--fsize={int(limits.max_file_bytes)}",
             "--core=0",
             "--",
         ]
-        return prefix + bwrap
+        return scope + prefix + bwrap
 
     def _audit_detail(
         self,
@@ -1305,6 +1543,33 @@ def _killpg(pid: int, sig: int) -> None:
             os.kill(pid, sig)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+
+
+def _cgroup_dir(pid: int) -> Path | None:
+    """Каталог cgroup v2 для процесса (systemd-scope запуска)."""
+    try:
+        with open(f"/proc/{int(pid)}/cgroup", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.startswith("0::"):
+                    continue
+                relative = line.strip().split("::", 1)[1].lstrip("/")
+                candidate = Path("/sys/fs/cgroup") / relative
+                return candidate if candidate.is_dir() else None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _scope_stats(cgroup: Path | None) -> tuple[int, int]:
+    """Число задач и память cgroup-scope (0, 0), если scope ещё не виден."""
+    if cgroup is None:
+        return 0, 0
+    try:
+        count = int((cgroup / "pids.current").read_text().strip())
+        memory = int((cgroup / "memory.current").read_text().strip())
+        return count, memory
+    except (OSError, ValueError):
+        return 0, 0
 
 
 def _process_group_stats(pgid: int) -> tuple[int, int]:
