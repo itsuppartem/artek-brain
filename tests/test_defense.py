@@ -99,11 +99,25 @@ def test_approved_cannot_be_changed_silently(service: Service) -> None:
         )
     assert "утвержден" in str(error.value).lower()
 
+    with pytest.raises(PermissionDenied):
+        service.brain.write(
+            token["agent"], "approved/docs/a.md", "# агент\n", "в обход"
+        )
+
     new = service.proposals.submit(
         token["agent"], "docs/a.md", "# A v2\n", "новая версия", base_version=1
     )
     service.proposals.approve(token["human"], new.path)
     assert service.brain.read(token["owner"], "approved/docs/a.md").version == 2
+
+
+def test_agent_cannot_write_to_foreign_proposal(service: Service) -> None:
+    token = tokens(service)
+    service.access.create_token("agent-2", "agent", [("", "write")])
+    with pytest.raises(PermissionDenied):
+        service.proposals.submit(
+            token["agent"], "proposals/agent-2/docs/a.md", "# A\n", "чужое"
+        )
 
 
 def test_reject_proposal(service: Service) -> None:
@@ -163,6 +177,25 @@ def test_fake_and_missing_evidence_are_rejected(service: Service) -> None:
         )
 
 
+def test_valid_audit_ref_evidence_is_accepted(service: Service) -> None:
+    token = tokens(service)
+    task, claim = _claimed_task(service, ["docs"], "DOC")
+    service.brain.write(token["agent"], "docs/a.md", "# A\n", "создал")
+    entries = service.brain.audit(
+        token["owner"], action="write", actor="agent-1"
+    )
+    audit_id = entries[0].id
+    review = service.board.submit(
+        task.id,
+        "agent-1",
+        evidence=[{"type": "audit_ref", "audit_id": audit_id}],
+        revision=claim.revision,
+        token=claim.token,
+    )
+    assert review.status == "review"
+    assert review.evidence_mismatch is False
+
+
 def test_valid_doc_version_evidence_is_accepted(service: Service) -> None:
     token = tokens(service)
     service.brain.write(token["agent"], "docs/a.md", "# A\n", "создал")
@@ -187,7 +220,6 @@ def test_valid_doc_version_evidence_is_accepted(service: Service) -> None:
 
 
 def test_free_text_is_rejected_for_critical_area(service: Service) -> None:
-    _claimed_task(service, ["rules"], "RULE")
     task, claim = _claimed_task(service, ["rules"], "RUL2")
     with pytest.raises(EvidenceError) as error:
         service.board.submit(
@@ -201,6 +233,7 @@ def test_free_text_is_rejected_for_critical_area(service: Service) -> None:
 
 
 def test_claimed_read_must_exist_in_audit(service: Service) -> None:
+    token = tokens(service)
     task, claim = _claimed_task(service, ["docs"], "DOC")
     review = service.board.submit(
         task.id,
@@ -212,6 +245,12 @@ def test_claimed_read_must_exist_in_audit(service: Service) -> None:
     assert review.status == "review"
     assert review.evidence_mismatch is True
     assert review.evidence_report["mismatches"]
+
+    queued = service.review_queue.list(token["owner"], status="open")
+    assert any(
+        item.path == f"task/{task.id}" and item.reason == "evidence_mismatch"
+        for item in queued
+    )
 
 
 def test_file_hash_evidence(service: Service, tmp_path: Path) -> None:
@@ -273,6 +312,42 @@ def test_runner_records_real_run_and_seed_fraction(
     )
     assert fraction.pass_rate == 0.5
     assert fraction.status == "partial"
+
+
+def test_agent_cannot_override_run_command(
+    service: Service, tmp_path: Path
+) -> None:
+    token = tokens(service)
+    task, _ = _claimed_task(service, ["docs"], "DOC")
+    repo = service.root.parent / "repo"
+    service.runs.configure(
+        "docs", {"command": python_command("import sys; sys.exit(0)")}
+    )
+    record = service.run(token["agent"], task.id, workdir=repo)
+    assert record["status"] == "pass"
+
+    with pytest.raises(PermissionDenied):
+        service.run(
+            token["agent"],
+            task.id,
+            command=python_command("import sys; sys.exit(0)"),
+            workdir=repo,
+        )
+    with pytest.raises(PermissionDenied):
+        service.run(token["agent"], task.id, hidden_command="true", workdir=repo)
+
+
+def test_runner_enforces_timeout(service: Service, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    record = service.runs.run(
+        "agent-1",
+        command=python_command("import time; time.sleep(5)"),
+        workdir=repo,
+        timeout=0.2,
+    )
+    assert record.status == "fail"
+    assert record.exit_code == -1
+    assert "timeout" in record.output_tail
 
 
 def test_test_run_evidence_must_exist_and_pass(service: Service) -> None:
@@ -370,6 +445,40 @@ def test_version_spike_creates_incident_and_suspends(service: Service) -> None:
     assert stored and service.store.read(stored[0].path).content
 
 
+def test_mass_edits_size_growth_and_rollbacks_are_detected(
+    service: Service,
+) -> None:
+    bulk = str(service.access.create_token("bulk", "agent", [("", "write")]))
+    for index in range(4):
+        service.brain.write(bulk, f"docs/{index}.md", "# x\n", "массово")
+    service.brain.write(bulk, "docs/big.md", "a" * 200, "маленький")
+    service.brain.write(
+        bulk, "docs/big.md", "a" * 200_000, "большой", base_version=1
+    )
+    service.brain.write(bulk, "docs/roll.md", "# v1\n", "первая")
+    service.brain.write(
+        bulk, "docs/roll.md", "# v2\n", "вторая", base_version=1
+    )
+    for _ in range(3):
+        service.brain.rollback_version(bulk, "docs/roll.md", 1, "откат")
+
+    detector = AnomalyDetector(
+        service.store,
+        access=service.access,
+        config={
+            "window_minutes": 60,
+            "version_spike": 100,
+            "mass_edit_docs": 3,
+            "rollback_count": 3,
+            "size_growth_factor": 5,
+            "size_growth_min_bytes": 100_000,
+            "auto_suspend": False,
+        },
+    )
+    kinds = {item.kind for item in detector.scan()}
+    assert {"mass_edits", "size_growth", "repeated_rollbacks"} <= kinds
+
+
 def test_protected_path_probing_and_hidden_reads_are_detected(
     service: Service,
 ) -> None:
@@ -455,6 +564,11 @@ def test_hidden_is_invisible_to_agent_tokens(service: Service) -> None:
 
     found = service.brain.search(token["agent"], "hidden")
     assert all("hidden" not in item.path for item in found.items)
+
+    changes = service.brain.changes_since(token["agent"])
+    assert all(
+        item.path is None or "hidden" not in item.path for item in changes.items
+    )
 
     auditor = str(service.access.create_token("auditor", "auditor", [("", "read")]))
     entries = service.brain.audit(auditor, action="write")
