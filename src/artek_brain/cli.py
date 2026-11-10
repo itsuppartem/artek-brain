@@ -73,6 +73,21 @@ def _print_text(command: str, data: Any) -> None:
     if command == "diff" and isinstance(data, dict):
         print(data.get("diff", ""), end="")
         return
+    if command == "sandbox" and isinstance(data, dict):
+        if "stdout" in data:
+            print(data.get("stdout", ""), end="")
+            if data.get("stderr"):
+                print(data["stderr"], file=sys.stderr, end="")
+            print(
+                f"\n[exit={data.get('exit_code')} "
+                f"time={data.get('duration_ms')}ms "
+                f"mem={data.get('peak_memory_bytes')}b "
+                f"out={len(data.get('out') or [])}]",
+                file=sys.stderr,
+            )
+            return
+        _print_json(data)
+        return
     if command == "search" and isinstance(data, dict):
         items = data.get("items", [])
         print(f"Найдено: {data.get('total', len(items))}")
@@ -326,6 +341,58 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--session", default=None)
     export.add_argument("--model", default=None)
 
+    sandbox = add("sandbox", "песочница скриптов рядом с данными")
+    sandbox_sub = sandbox.add_subparsers(dest="sandbox_command", required=True)
+    sandbox_run = sandbox_sub.add_parser("run", help="выполнить скрипт")
+    _add_common(sandbox_run)
+    sandbox_run.add_argument(
+        "script",
+        nargs="?",
+        default="-",
+        help="Файл скрипта; - или пусто — читать stdin.",
+    )
+    sandbox_run.add_argument(
+        "--lang",
+        "--language",
+        dest="language",
+        default="python",
+        choices=["python", "shell", "sh", "bash"],
+        help="Язык скрипта (python или shell).",
+    )
+    sandbox_run.add_argument(
+        "--paths",
+        action="append",
+        default=None,
+        help="Путь или префикс среза (docs/ — префикс); можно повторять.",
+    )
+    sandbox_run.add_argument(
+        "--prefix", action="append", default=None, help="Префикс среза."
+    )
+    sandbox_run.add_argument("--max-documents", type=int, default=None)
+    sandbox_run.add_argument("--max-bytes", type=int, default=None)
+    sandbox_run.add_argument("--cpu", type=int, default=None, help="Лимит CPU, секунд.")
+    sandbox_run.add_argument(
+        "--wall", type=float, default=None, help="Лимит wall-time, секунд."
+    )
+    sandbox_run.add_argument(
+        "--memory", type=int, default=None, help="Лимит памяти, байт."
+    )
+    sandbox_run.add_argument(
+        "--processes", type=int, default=None, help="Лимит числа процессов."
+    )
+    sandbox_run.add_argument(
+        "--max-output", type=int, default=None, help="Лимит stdout/stderr, байт."
+    )
+    sandbox_run.add_argument("--cache", action="store_true", help="Вернуть кэш.")
+
+    sandbox_status = sandbox_sub.add_parser("status", help="статус запуска")
+    _add_common(sandbox_status)
+    sandbox_status.add_argument("id")
+
+    sandbox_cancel = sandbox_sub.add_parser("cancel", help="отменить запуск")
+    _add_common(sandbox_cancel)
+    sandbox_cancel.add_argument("id")
+
     serve = add("serve", "запустить HTTP JSON API")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
@@ -369,6 +436,43 @@ def _task_params(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "target", None):
         params["task_id"] = args.target
     return params
+
+
+def _read_script(name: str | None) -> str:
+    if not name or name == "-":
+        return sys.stdin.read()
+    try:
+        return Path(name).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ArtekBrainError(
+            f"Не удалось прочитать скрипт {name!r}: {exc}.",
+            hint="Передайте путь к файлу или - для stdin.",
+        ) from exc
+
+
+def _sandbox_inputs(args: argparse.Namespace) -> dict[str, Any] | None:
+    inputs: dict[str, Any] = {}
+    if getattr(args, "paths", None):
+        inputs["paths"] = list(args.paths)
+    if getattr(args, "prefix", None):
+        inputs["prefix"] = list(args.prefix)
+    if getattr(args, "max_documents", None) is not None:
+        inputs["max_documents"] = args.max_documents
+    if getattr(args, "max_bytes", None) is not None:
+        inputs["max_bytes"] = args.max_bytes
+    return inputs or None
+
+
+def _sandbox_limits(args: argparse.Namespace) -> dict[str, Any] | None:
+    mapping = {
+        "cpu_seconds": getattr(args, "cpu", None),
+        "wall_seconds": getattr(args, "wall", None),
+        "memory_bytes": getattr(args, "memory", None),
+        "max_processes": getattr(args, "processes", None),
+        "max_output_bytes": getattr(args, "max_output", None),
+    }
+    limits = {key: value for key, value in mapping.items() if value is not None}
+    return limits or None
 
 
 def _run(args: argparse.Namespace) -> Any:
@@ -562,6 +666,19 @@ def _run(args: argparse.Namespace) -> Any:
             return service.inbox(token, args.action, **params)
         if command == "brief":
             return service.brief(token, limit=args.limit)
+        if command == "sandbox":
+            if args.sandbox_command == "run":
+                return service.sandbox_run(
+                    token,
+                    _read_script(args.script),
+                    args.language,
+                    inputs=_sandbox_inputs(args),
+                    limits=_sandbox_limits(args),
+                    cache=args.cache,
+                )
+            if args.sandbox_command == "status":
+                return service.sandbox_status(token, args.id)
+            return service.sandbox_cancel(token, args.id)
         if command == "export":
             data = service.export(
                 token,
