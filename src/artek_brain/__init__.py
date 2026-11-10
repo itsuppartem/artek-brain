@@ -8,6 +8,14 @@ from __future__ import annotations
 from . import frontmatter, secrets
 from .access import Access, IssuedToken, Principal, Scope, TokenRecord
 from .brain import Brain
+from .embeddings import (
+    Embedder,
+    EmbeddingError,
+    HashEmbedder,
+    OllamaEmbedder,
+    build_embedder,
+)
+from .drift import Drift, DriftItem, Ref, check_drift, mark_stale, pin
 from .errors import (
     ArtekBrainError,
     BaseVersionRequiredError,
@@ -26,6 +34,7 @@ from .errors import (
 from .frontmatter import Frontmatter
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
 from .quota import Quota
+from .quality import Contradiction, DuplicatePair, Quality, SchemaResult
 from .registry import (
     Registry,
     ToolDisabled,
@@ -33,6 +42,16 @@ from .registry import (
     ToolLimitError,
     ToolNotFound,
     ToolSpec,
+)
+from .review_queue import (
+    APPROVED as QUEUE_APPROVED,
+    DEFERRED as QUEUE_DEFERRED,
+    DRIFT,
+    OVERDUE_REVIEW,
+    REJECTED as QUEUE_REJECTED,
+    STATUS_REVIEW,
+    QueueItem,
+    ReviewQueue,
 )
 from .sandbox import (
     Sandbox,
@@ -44,6 +63,21 @@ from .sandbox import (
     SandboxUnavailable,
 )
 from .search import Search, SearchItem, SearchPage
+from .semantic import (
+    CHUNK_CHARS,
+    PREFILTER_THRESHOLD,
+    SemanticDisabledError,
+    SemanticError,
+    SemanticIndex,
+    SemanticIndexError,
+    SemanticIndexStaleError,
+    SemanticNotConfiguredError,
+    SemanticSettings,
+    configure_semantic,
+    hybrid_search,
+    load_settings,
+    save_settings,
+)
 from .store import (
     AuditEntry,
     GcResult,
@@ -108,6 +142,42 @@ __all__ = [
     "ToolNotFound",
     "ToolDisabled",
     "ToolLimitError",
+    "SemanticIndex",
+    "SemanticSettings",
+    "SemanticError",
+    "SemanticDisabledError",
+    "SemanticNotConfiguredError",
+    "SemanticIndexStaleError",
+    "SemanticIndexError",
+    "Embedder",
+    "HashEmbedder",
+    "OllamaEmbedder",
+    "EmbeddingError",
+    "build_embedder",
+    "configure_semantic",
+    "load_settings",
+    "save_settings",
+    "hybrid_search",
+    "CHUNK_CHARS",
+    "PREFILTER_THRESHOLD",
+    "Quality",
+    "DuplicatePair",
+    "Contradiction",
+    "SchemaResult",
+    "Drift",
+    "DriftItem",
+    "Ref",
+    "check_drift",
+    "mark_stale",
+    "pin",
+    "ReviewQueue",
+    "QueueItem",
+    "QUEUE_APPROVED",
+    "QUEUE_REJECTED",
+    "QUEUE_DEFERRED",
+    "DRIFT",
+    "STATUS_REVIEW",
+    "OVERDUE_REVIEW",
     "Scope",
     "Principal",
     "IssuedToken",
