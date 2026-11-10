@@ -23,6 +23,7 @@ from .errors import (
     StoredDataError,
     ValidationError,
 )
+from .deltas import ArchiveResult, RepackResult
 from .frontmatter import Frontmatter
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
 from .quota import Quota
@@ -100,6 +101,8 @@ __all__ = [
     "RollbackSkipped",
     "AuditEntry",
     "GcResult",
+    "RepackResult",
+    "ArchiveResult",
     "ArtekBrainError",
     "ValidationError",
     "NotFoundError",

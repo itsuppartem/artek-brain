@@ -22,6 +22,10 @@ packages = ["src/artek_brain"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: нагрузочные тесты; запуск: uv run pytest -m slow",
+]
 
 [project.scripts]
 brain = "artek_brain.cli:main"
