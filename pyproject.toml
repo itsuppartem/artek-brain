@@ -5,6 +5,11 @@ description = "Общий слой памяти и инструментов дл
 requires-python = ">=3.12"
 dependencies = []
 
+[project.optional-dependencies]
+mcp = [
+    "mcp>=2.3.0",
+]
+
 [dependency-groups]
 dev = ["pytest>=8"]
 
@@ -17,3 +22,6 @@ packages = ["src/artek_brain"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[project.scripts]
+brain = "artek_brain.cli:main"
