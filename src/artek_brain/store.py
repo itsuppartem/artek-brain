@@ -20,6 +20,7 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 from . import secrets as secret_scanner
+from .deltas import ArchiveResult, DeltaStorage, RepackResult
 from .errors import (
     ArtekBrainError,
     BaseVersionRequiredError,
@@ -476,7 +477,14 @@ def _select_section(text: str, section: str) -> str:
 class Store:
     """Хранилище документов: версии, блобы, аудит, откаты и квоты."""
 
-    def __init__(self, path: str | os.PathLike[str], *, quota: Quota | None = None) -> None:
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        quota: Quota | None = None,
+        snapshot_every: int = 20,
+        delta_ratio: float = 0.9,
+    ) -> None:
         self.root = Path(path)
         if self.root.exists() and not self.root.is_dir():
             raise ValidationError(
@@ -503,6 +511,14 @@ class Store:
         self._conn.execute("PRAGMA busy_timeout=30000")
         with self._conn:
             self._conn.executescript(_SCHEMA)
+        self.storage = DeltaStorage(
+            self._conn,
+            self.blobs_dir,
+            root=self.root,
+            snapshot_every=snapshot_every,
+            delta_ratio=delta_ratio,
+            quota_provider=lambda: self.quota,
+        )
 
     # ------------------------------------------------------------------
     # Служебное
@@ -665,33 +681,7 @@ class Store:
         return sha, len(data)
 
     def _read_blob(self, sha: str) -> str:
-        target = self._blob_path(sha)
-        try:
-            compressed = target.read_bytes()
-        except FileNotFoundError as exc:
-            raise StoredDataError(
-                f"Блоб {sha[:12]}… не найден на диске.",
-                hint="Запустите gc() или восстановите каталог blobs из резервной копии.",
-            ) from exc
-        try:
-            data = zlib.decompress(compressed)
-        except zlib.error as exc:
-            raise StoredDataError(
-                f"Блоб {sha[:12]}… повреждён (zlib).",
-                hint="Восстановите каталог blobs из резервной копии.",
-            ) from exc
-        if _sha256(data) != sha:
-            raise StoredDataError(
-                f"Блоб {sha[:12]}… не совпал по sha256.",
-                hint="Данные повреждены; восстановите каталог blobs из резервной копии.",
-            )
-        try:
-            return data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise StoredDataError(
-                f"Блоб {sha[:12]}… не является UTF-8 текстом.",
-                hint="Проверьте, что документ был записан как текст.",
-            ) from exc
+        return self.storage.read_content(sha)
 
     def _check_versions_quota_locked(self, path: str) -> None:
         used = self._conn.execute(
@@ -997,8 +987,15 @@ class Store:
         data = final_text.encode("utf-8")
         self.quota.check_document_size(len(data), path)
         secret_scanner.assert_clean(final_text, path)
-        sha, size = self._put_blob(data)
         new_n = 1 if doc is None else current_n + 1
+        base_data = (
+            current_text.encode("utf-8")
+            if doc is not None and parent_n is not None
+            else None
+        )
+        sha, size = self.storage.put_version(
+            path, new_n, parent_n, data, base_data
+        )
         if doc is None:
             self._conn.execute(
                 "INSERT INTO documents (path, current_version, deleted, created_at) VALUES (?, NULL, 0, ?)",
@@ -2133,17 +2130,47 @@ class Store:
             "reads": int(reads),
         }
 
+    def repack(
+        self,
+        *,
+        snapshot_every: int | None = None,
+        actor: str | None = None,
+    ) -> RepackResult:
+        """Переупаковать существующие версии в дельты (идемпотентно)."""
+        with self._lock:
+            self._ensure_open()
+            result = self.storage.repack(snapshot_every=snapshot_every)
+            with self._conn:
+                self._audit_ok(actor, "repack", None, result.as_dict())
+            return result
+
+    def archive_old_versions(
+        self,
+        older_than: Any,
+        keep_last: int = 0,
+        *,
+        actor: str | None = None,
+    ) -> ArchiveResult:
+        """Сжать холодные версии (lzma) и пометить их archived."""
+        with self._lock:
+            self._ensure_open()
+            result = self.storage.archive_old_versions(older_than, keep_last)
+            with self._conn:
+                self._audit_ok(actor, "archive", None, result.as_dict())
+            return result
+
+    def disk_report(self, *, days: int = 30, forecast_days: int = 30) -> dict[str, Any]:
+        """Размеры, байты на версию, прогноз роста и процент квоты."""
+        with self._lock:
+            self._ensure_open()
+            return self.storage.disk_report(days=days, forecast_days=forecast_days)
+
     def gc(self, *, actor: str | None = None) -> GcResult:
-        """Удалить блобы, на которые не ссылается ни одна версия."""
+        """Удалить блобы, на которые не ссылается ни одна версия или дельта."""
         with self._lock:
             self._ensure_open()
             with self._conn:
-                referenced = {
-                    row["sha256"]
-                    for row in self._conn.execute(
-                        "SELECT DISTINCT sha256 FROM versions"
-                    ).fetchall()
-                }
+                referenced = self.storage.referenced_blobs()
                 files = [
                     item for item in self.blobs_dir.rglob("*") if item.is_file()
                 ]

@@ -275,6 +275,18 @@ def _parser() -> argparse.ArgumentParser:
 
     add("stats", "статистика хранилища")
 
+    repack = add("repack", "переупаковать версии в дельты")
+    repack.add_argument(
+        "--snapshot-every",
+        type=int,
+        default=None,
+        help="Полный снимок каждые N версий (по умолчанию из хранилища).",
+    )
+
+    disk_report = add("disk-report", "отчёт о месте на диске")
+    disk_report.add_argument("--days", type=int, default=30)
+    disk_report.add_argument("--forecast-days", dest="forecast_days", type=int, default=30)
+
     task = add("task", "операции доски задач")
     task.add_argument("action", help="create, list, show, claim, start, ...")
     task.add_argument("target", nargs="?", default=None, help="id задачи, если нужен.")
@@ -545,6 +557,14 @@ def _run(args: argparse.Namespace) -> Any:
             )
         if command == "stats":
             return service.stats(token)
+        if command == "repack":
+            return service.repack(
+                token, snapshot_every=args.snapshot_every
+            )
+        if command == "disk-report":
+            return service.disk_report(
+                token, days=args.days, forecast_days=args.forecast_days
+            )
         if command == "task":
             return service.task(token, args.action, **_task_params(args))
         if command == "inbox":

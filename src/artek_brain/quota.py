@@ -20,6 +20,7 @@ class Quota:
     max_document_bytes: int = MIB
     max_versions_per_document: int = 10_000
     max_writes_per_author_per_day: int = 100_000
+    max_disk_bytes: int | None = None
 
     def check_document_size(self, size: int, path: str | None = None) -> None:
         """Проверить размер содержимого в байтах."""
@@ -52,4 +53,17 @@ class Quota:
                 used,
                 path=author,
                 hint="Подождите до следующих суток UTC или увеличьте лимит.",
+            )
+
+    def check_disk(self, used: int) -> None:
+        """Проверить жёсткий лимит диска (если он задан)."""
+        if self.max_disk_bytes is not None and used > self.max_disk_bytes:
+            raise QuotaError(
+                "диск",
+                self.max_disk_bytes,
+                used,
+                hint=(
+                    "Удалите лишние версии/блобы через gc(), включите архив "
+                    "archive_old_versions() или увеличьте max_disk_bytes."
+                ),
             )
