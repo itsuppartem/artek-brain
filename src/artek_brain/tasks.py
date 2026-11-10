@@ -66,7 +66,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     revision INTEGER NOT NULL,
     claim_token TEXT,
     claim_expires_at TEXT,
+    claimed_at TEXT,
     evidence TEXT,
+    evidence_mismatch INTEGER NOT NULL DEFAULT 0,
+    evidence_report TEXT,
     note TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -147,6 +150,9 @@ class Task:
     note: str | None
     created_at: str
     updated_at: str
+    claimed_at: str | None = None
+    evidence_mismatch: bool = False
+    evidence_report: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Представить задачу словарём."""
@@ -163,7 +169,10 @@ class Task:
             "revision": self.revision,
             "claim_token": self.claim_token,
             "claim_expires_at": self.claim_expires_at,
+            "claimed_at": self.claimed_at,
             "evidence": self.evidence,
+            "evidence_mismatch": self.evidence_mismatch,
+            "evidence_report": self.evidence_report,
             "note": self.note,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -441,6 +450,8 @@ class TaskBoard:
         clock: Callable[[], datetime] | None = None,
         reviewers: Iterable[str] = (),
         owners: Iterable[str] = (),
+        evidence_checker: Any = None,
+        review_queue: Any = None,
     ) -> None:
         if not isinstance(max_claims, int) or isinstance(max_claims, bool) or max_claims < 1:
             raise ValidationError(
@@ -455,13 +466,30 @@ class TaskBoard:
         self._store = store
         self._max_claims = int(max_claims)
         self._clock = clock or _utc_now
+        self._evidence_checker = evidence_checker
+        self._review_queue = review_queue
         self._store._ensure_open()
         with self._store._conn:
             self._store._conn.executescript(_SCHEMA)
+            self._ensure_columns()
         for name in reviewers:
             self.grant_role(name, "reviewer")
         for name in owners:
             self.grant_role(name, "owner")
+
+    def _ensure_columns(self) -> None:
+        """Добавить новые колонки в старую базу задач без потери данных."""
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "claimed_at" not in columns:
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN claimed_at TEXT")
+        if "evidence_mismatch" not in columns:
+            self._conn.execute(
+                "ALTER TABLE tasks ADD COLUMN evidence_mismatch INTEGER NOT NULL DEFAULT 0"
+            )
+        if "evidence_report" not in columns:
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN evidence_report TEXT")
 
     # ------------------------------------------------------------------
     # Служебное
@@ -498,6 +526,14 @@ class TaskBoard:
             pass
 
     def _row_to_task(self, row: Any) -> Task:
+        report = None
+        raw_report = row["evidence_report"] if "evidence_report" in row.keys() else None
+        if raw_report:
+            try:
+                parsed = json.loads(raw_report)
+                report = parsed if isinstance(parsed, dict) else None
+            except (TypeError, json.JSONDecodeError):
+                report = None
         return Task(
             id=row["id"],
             title=row["title"],
@@ -515,6 +551,15 @@ class TaskBoard:
             note=row["note"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            claimed_at=(
+                row["claimed_at"] if "claimed_at" in row.keys() else None
+            ),
+            evidence_mismatch=bool(
+                row["evidence_mismatch"]
+                if "evidence_mismatch" in row.keys()
+                else 0
+            ),
+            evidence_report=report,
         )
 
     def _find_locked(self, task_id: str) -> Task:
@@ -971,10 +1016,10 @@ class TaskBoard:
                     """
                     UPDATE tasks
                     SET status=?, assignee=?, claim_token=?, claim_expires_at=?,
-                        revision=revision+1, updated_at=?
+                        claimed_at=?, revision=revision+1, updated_at=?
                     WHERE id=?
                     """,
-                    (CLAIMED, agent_name, token, expires, now_iso, task.id),
+                    (CLAIMED, agent_name, token, expires, now_iso, now_iso, task.id),
                 )
                 self._audit(
                     agent_name,
@@ -1141,19 +1186,35 @@ class TaskBoard:
         task_id: str,
         agent: str,
         *,
-        evidence: str,
+        evidence: Any,
         revision: int,
         token: str | None = None,
         body: str | None = None,
     ) -> Task:
-        """Отправить задачу в review с обязательными доказательствами."""
+        """Отправить задачу в review с проверяемыми доказательствами."""
         agent_name = self._require_name(agent, "agent")
-        clean_evidence = self._require_text(evidence, "evidence").strip()
-        if not clean_evidence:
-            raise ValidationError(
-                "evidence обязателен при submit.",
-                hint="Приложите ссылки, хеши или вывод тестов, подтверждающие работу.",
-            )
+        if isinstance(evidence, str):
+            clean_evidence = self._require_text(evidence, "evidence").strip()
+            if not clean_evidence:
+                raise ValidationError(
+                    "evidence обязателен при submit.",
+                    hint="Приложите ссылки, хеши или вывод тестов, подтверждающие работу.",
+                )
+            evidence_value: Any = clean_evidence
+            stored_evidence = clean_evidence
+        else:
+            if self._evidence_checker is None:
+                raise ValidationError(
+                    "evidence должен быть строкой или структурированным списком.",
+                    hint="Для структурированных доказательств нужен EvidenceChecker.",
+                )
+            if not evidence:
+                raise ValidationError(
+                    "evidence обязателен при submit.",
+                    hint="Приложите doc_version, test_run, file_hash или audit_ref.",
+                )
+            evidence_value = evidence
+            stored_evidence = json.dumps(evidence, ensure_ascii=False, default=str)
         if body is not None:
             body = self._require_text(body, "body")
         with self._lock:
@@ -1172,23 +1233,81 @@ class TaskBoard:
                     f"Неверный claim_token для задачи «{task.id}».",
                     hint="Используйте токен, выданный в claim().",
                 )
+            mismatch = False
+            report_dict: dict[str, Any] | None = None
+            if self._evidence_checker is not None:
+                from .evidence import EvidenceError
+
+                report = self._evidence_checker.validate(
+                    agent_name, task, evidence_value, now=self._now()
+                )
+                if not report.ok:
+                    reasons = "; ".join(
+                        str(item.get("reason") or "отклонено")
+                        for item in report.rejected
+                    )
+                    if report.critical and not report.accepted:
+                        message = (
+                            "Доказательства не подтверждают работу "
+                            "для критичной области."
+                        )
+                    elif report.critical and report.weak_only:
+                        message = (
+                            "Свободный текст без проверяемой ссылки "
+                            "не принимается для критичной области."
+                        )
+                    else:
+                        message = "Доказательства не подтверждают работу по задаче."
+                    if reasons:
+                        message = f"{message} Причины: {reasons}."
+                    raise EvidenceError(message, report)
+                mismatch = report.has_mismatch
+                report_dict = report.as_dict()
             now_iso = _format_ts(self._now())
             with self._conn:
                 self._conn.execute(
                     """
                     UPDATE tasks
-                    SET status=?, evidence=?, body=COALESCE(?, body),
+                    SET status=?, evidence=?, evidence_mismatch=?, evidence_report=?,
+                        body=COALESCE(?, body),
                         claim_token=NULL, claim_expires_at=NULL,
                         revision=revision+1, updated_at=?
                     WHERE id=?
                     """,
-                    (REVIEW, clean_evidence, body, now_iso, task.id),
+                    (
+                        REVIEW,
+                        stored_evidence,
+                        1 if mismatch else 0,
+                        (
+                            json.dumps(report_dict, ensure_ascii=False)
+                            if report_dict is not None
+                            else None
+                        ),
+                        body,
+                        now_iso,
+                        task.id,
+                    ),
                 )
                 self._audit(
                     agent_name,
                     "task_submit",
                     task.id,
-                    {"evidence": clean_evidence, "revision": revision},
+                    {
+                        "evidence": stored_evidence,
+                        "revision": revision,
+                        "evidence_mismatch": mismatch,
+                        "evidence_report": report_dict,
+                    },
+                )
+            if mismatch and self._review_queue is not None:
+                self._review_queue.add(
+                    f"task/{task.id}",
+                    "evidence_mismatch",
+                    detail=(
+                        f"задача {task.id}: заявленные действия не найдены "
+                        "в аудите актора"
+                    ),
+                    actor=agent_name,
                 )
             return self._find_locked(task.id)
 
