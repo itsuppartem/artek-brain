@@ -22,6 +22,10 @@ packages = ["src/artek_brain"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not load'"
+markers = [
+    "load: нагрузочные тесты; запуск: uv run pytest -m load (по одному, не параллельно)",
+]
 
 [project.scripts]
 brain = "artek_brain.cli:main"

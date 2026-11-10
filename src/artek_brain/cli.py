@@ -378,6 +378,18 @@ def _parser() -> argparse.ArgumentParser:
 
     add("stats", "статистика хранилища")
 
+    repack = add("repack", "переупаковать версии в дельты")
+    repack.add_argument(
+        "--snapshot-every",
+        type=int,
+        default=None,
+        help="Полный снимок каждые N версий (по умолчанию из хранилища).",
+    )
+
+    disk_report = add("disk-report", "отчёт о месте на диске")
+    disk_report.add_argument("--days", type=int, default=30)
+    disk_report.add_argument("--forecast-days", dest="forecast_days", type=int, default=30)
+
     quality = add("quality", "качество знаний: отчёты, drift, дубли, противоречия, очередь")
     quality_sub = quality.add_subparsers(dest="quality_command", required=True)
     q_report = quality_sub.add_parser("report", help="метрики качества")
@@ -830,6 +842,14 @@ def _run(args: argparse.Namespace) -> Any:
             )
         if command == "stats":
             return service.stats(token)
+        if command == "repack":
+            return service.repack(
+                token, snapshot_every=args.snapshot_every
+            )
+        if command == "disk-report":
+            return service.disk_report(
+                token, days=args.days, forecast_days=args.forecast_days
+            )
         if command == "quality":
             return _quality(service, token, args)
         if command == "task":

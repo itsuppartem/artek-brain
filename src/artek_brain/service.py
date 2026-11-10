@@ -717,6 +717,32 @@ class Service:
         """Метрики хранилища."""
         return _jsonable(self.brain.stats(token or ""))
 
+    def repack(
+        self,
+        token: str | None,
+        *,
+        snapshot_every: int | None = None,
+    ) -> dict[str, Any]:
+        """Переупаковать версии в дельты; только owner."""
+        principal = self._require_owner(token, "repack")
+        result = self.store.repack(
+            snapshot_every=snapshot_every, actor=principal.name
+        )
+        return _jsonable(result.as_dict())
+
+    def disk_report(
+        self,
+        token: str | None,
+        *,
+        days: int = 30,
+        forecast_days: int = 30,
+    ) -> dict[str, Any]:
+        """Отчёт о месте на диске; только owner."""
+        self._require_owner(token, "disk_report")
+        return _jsonable(
+            self.store.disk_report(days=days, forecast_days=forecast_days)
+        )
+
     def who_knows(self, token: str | None, path: str) -> dict[str, Any] | None:
         """Кто последним менял путь."""
         self.principal(token)
