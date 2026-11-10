@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from types import TracebackType
@@ -19,6 +20,7 @@ from .errors import PermissionDenied, ValidationError
 from .evidence import EvidenceChecker
 from .proposals import ProposalStore
 from .quota import Quota
+from .review_queue import ReviewQueue
 from .runs import Runner
 from .store import Store
 from .tasks import TaskBoard
@@ -65,6 +67,24 @@ def _as_list(value: Iterable[Any] | str | None) -> list[Any] | None:
     return cleaned or None
 
 
+def _load_area_config(root: Path) -> dict[str, Any]:
+    """Прочитать настройки проверок областей из settings.json (блок runs)."""
+    target = root / "settings.json"
+    if not target.is_file():
+        return {}
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValidationError(
+            "Не удалось прочитать settings.json с настройками прогонов.",
+            hint="Исправьте JSON или удалите блок runs.",
+        ) from exc
+    if not isinstance(raw, dict):
+        return {}
+    block = raw.get("runs")
+    return block if isinstance(block, dict) else {}
+
+
 def _as_int(value: Any, name: str) -> int | None:
     """Привести значение к int с понятной ошибкой."""
     if value is None or isinstance(value, bool):
@@ -100,14 +120,19 @@ class Service:
             self.store,
             workdir=repo_root or Path.cwd(),
             hidden_dir=self.root / "hidden",
+            area_config=_load_area_config(self.root),
         )
         self.evidence = EvidenceChecker(
             self.store,
             runs=self.runs,
             repo_root=repo_root or Path.cwd(),
         )
+        self.review_queue = ReviewQueue(self.store, self.access)
         self.board = TaskBoard(
-            self.store, max_claims=max_claims, evidence_checker=self.evidence
+            self.store,
+            max_claims=max_claims,
+            evidence_checker=self.evidence,
+            review_queue=self.review_queue,
         )
         self.proposals = ProposalStore(self.store, self.access)
         self.anomalies = AnomalyDetector(
@@ -923,6 +948,19 @@ class Service:
                 "write",
                 actor=principal.name,
                 reason="запускать проверку может арендатор задачи или owner",
+            )
+        if principal.role not in ("owner", "human") and (
+            command is not None or hidden_command is not None
+        ):
+            raise PermissionDenied(
+                "run",
+                task.id,
+                "owner",
+                actor=principal.name,
+                reason=(
+                    "агент не задаёт команду и скрытые проверки: "
+                    "они берутся из настроек области"
+                ),
             )
         area = task.area[0] if task.area else None
         record = self.runs.run(

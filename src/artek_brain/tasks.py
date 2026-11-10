@@ -451,6 +451,7 @@ class TaskBoard:
         reviewers: Iterable[str] = (),
         owners: Iterable[str] = (),
         evidence_checker: Any = None,
+        review_queue: Any = None,
     ) -> None:
         if not isinstance(max_claims, int) or isinstance(max_claims, bool) or max_claims < 1:
             raise ValidationError(
@@ -466,6 +467,7 @@ class TaskBoard:
         self._max_claims = int(max_claims)
         self._clock = clock or _utc_now
         self._evidence_checker = evidence_checker
+        self._review_queue = review_queue
         self._store._ensure_open()
         with self._store._conn:
             self._store._conn.executescript(_SCHEMA)
@@ -1240,10 +1242,25 @@ class TaskBoard:
                     agent_name, task, evidence_value, now=self._now()
                 )
                 if not report.ok:
-                    raise EvidenceError(
-                        "Доказательства не подтверждают работу по задаче.",
-                        report,
+                    reasons = "; ".join(
+                        str(item.get("reason") or "отклонено")
+                        for item in report.rejected
                     )
+                    if report.critical and not report.accepted:
+                        message = (
+                            "Доказательства не подтверждают работу "
+                            "для критичной области."
+                        )
+                    elif report.critical and report.weak_only:
+                        message = (
+                            "Свободный текст без проверяемой ссылки "
+                            "не принимается для критичной области."
+                        )
+                    else:
+                        message = "Доказательства не подтверждают работу по задаче."
+                    if reasons:
+                        message = f"{message} Причины: {reasons}."
+                    raise EvidenceError(message, report)
                 mismatch = report.has_mismatch
                 report_dict = report.as_dict()
             now_iso = _format_ts(self._now())
@@ -1281,6 +1298,16 @@ class TaskBoard:
                         "evidence_mismatch": mismatch,
                         "evidence_report": report_dict,
                     },
+                )
+            if mismatch and self._review_queue is not None:
+                self._review_queue.add(
+                    f"task/{task.id}",
+                    "evidence_mismatch",
+                    detail=(
+                        f"задача {task.id}: заявленные действия не найдены "
+                        "в аудите актора"
+                    ),
+                    actor=agent_name,
                 )
             return self._find_locked(task.id)
 

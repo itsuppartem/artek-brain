@@ -24,8 +24,9 @@ STATUSES = (OPEN, APPROVED, REJECTED, DEFERRED)
 DRIFT = "drift"
 STATUS_REVIEW = "status_review"
 OVERDUE_REVIEW = "overdue_review"
+EVIDENCE_MISMATCH = "evidence_mismatch"
 
-REASONS = (DRIFT, STATUS_REVIEW, OVERDUE_REVIEW)
+REASONS = (DRIFT, STATUS_REVIEW, OVERDUE_REVIEW, EVIDENCE_MISMATCH)
 """Причины попадания документа в очередь."""
 
 _REVIEW_ROLES = ("owner", "human")

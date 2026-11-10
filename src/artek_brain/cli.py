@@ -470,7 +470,9 @@ def _parser() -> argparse.ArgumentParser:
 
     run = add("run", "серверный прогон проверки по задаче")
     run.add_argument("task", help="id задачи.")
-    run.add_argument("--command", default=None, help="Команда проверки.")
+    run.add_argument(
+        "--command", dest="check_command", default=None, help="Команда проверки."
+    )
     run.add_argument("--seeds", type=int, default=None)
     run.add_argument("--timeout", type=float, default=None)
     run.add_argument("--workdir", default=None)
@@ -771,7 +773,7 @@ def _run(args: argparse.Namespace) -> Any:
             return service.run(
                 token,
                 args.task,
-                command=args.command,
+                command=args.check_command,
                 seeds=args.seeds,
                 timeout=args.timeout,
                 workdir=args.workdir,
