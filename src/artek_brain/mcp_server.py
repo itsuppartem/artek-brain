@@ -74,7 +74,10 @@ _TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "brain_search",
-        "description": "Полнотекстовый поиск с фильтрами и пагинацией.",
+        "description": (
+            "Поиск с фильтрами и пагинацией: mode=fts (по умолчанию), "
+            "semantic или hybrid (FTS + семантика через RRF)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -89,6 +92,11 @@ _TOOL_DEFS: list[dict[str, Any]] = [
                 "limit": {"type": "integer"},
                 "offset": {"type": "integer"},
                 "history": {"type": "boolean"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["fts", "semantic", "hybrid"],
+                    "description": "Режим поиска, по умолчанию fts.",
+                },
                 "cursor": {"type": "string"},
             },
             "required": ["query"],
@@ -149,8 +157,8 @@ _ACTION_HELP: dict[str, tuple[str, str, str]] = {
     ),
     "search": (
         "Поиск. Параметры: query (обязателен), path_prefix, type, status, tags, "
-        "author, since, until, limit, offset, history.",
-        "brain_search(query=\"деплой\", path_prefix=\"docs\")",
+        "author, since, until, limit, offset, history, mode=fts|semantic|hybrid.",
+        "brain_search(query=\"деплой\", path_prefix=\"docs\", mode=\"hybrid\")",
         "Возвращает items (path, version, title, snippet), total, offset, has_more.",
     ),
     "ls": (

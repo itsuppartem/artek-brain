@@ -448,8 +448,15 @@ class Service:
         limit: int = 20,
         offset: int = 0,
         history: bool = False,
+        mode: str = "fts",
     ) -> dict[str, Any]:
-        """Полнотекстовый поиск по текущим версиям или истории."""
+        """Поиск по текущим версиям (fts/semantic/hybrid) или истории."""
+        mode = str(mode or "fts").strip().lower()
+        if history and mode != "fts":
+            raise ValidationError(
+                "Семантический и гибридный поиск доступны только по текущим версиям.",
+                hint="Уберите history=true или выберите mode=fts.",
+            )
         page = (
             self.brain.search_history
             if history
@@ -466,6 +473,7 @@ class Service:
             until=until,
             limit=_as_int(limit, "limit") or 20,
             offset=_as_int(offset, "offset") or 0,
+            **({} if history else {"mode": mode}),
         )
         return _jsonable(page)
 

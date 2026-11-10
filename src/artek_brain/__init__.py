@@ -8,6 +8,13 @@ from __future__ import annotations
 from . import frontmatter, secrets
 from .access import Access, IssuedToken, Principal, Scope, TokenRecord
 from .brain import Brain
+from .embeddings import (
+    Embedder,
+    EmbeddingError,
+    HashEmbedder,
+    OllamaEmbedder,
+    build_embedder,
+)
 from .errors import (
     ArtekBrainError,
     BaseVersionRequiredError,
@@ -27,6 +34,21 @@ from .frontmatter import Frontmatter
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
 from .quota import Quota
 from .search import Search, SearchItem, SearchPage
+from .semantic import (
+    CHUNK_CHARS,
+    PREFILTER_THRESHOLD,
+    SemanticDisabledError,
+    SemanticError,
+    SemanticIndex,
+    SemanticIndexError,
+    SemanticIndexStaleError,
+    SemanticNotConfiguredError,
+    SemanticSettings,
+    configure_semantic,
+    hybrid_search,
+    load_settings,
+    save_settings,
+)
 from .store import (
     AuditEntry,
     GcResult,
@@ -78,6 +100,24 @@ __all__ = [
     "Brain",
     "Search",
     "Nav",
+    "SemanticIndex",
+    "SemanticSettings",
+    "SemanticError",
+    "SemanticDisabledError",
+    "SemanticNotConfiguredError",
+    "SemanticIndexStaleError",
+    "SemanticIndexError",
+    "Embedder",
+    "HashEmbedder",
+    "OllamaEmbedder",
+    "EmbeddingError",
+    "build_embedder",
+    "configure_semantic",
+    "load_settings",
+    "save_settings",
+    "hybrid_search",
+    "CHUNK_CHARS",
+    "PREFILTER_THRESHOLD",
     "Scope",
     "Principal",
     "IssuedToken",

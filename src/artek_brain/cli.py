@@ -255,6 +255,17 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--limit", type=int, default=20)
     search.add_argument("--offset", type=int, default=0)
     search.add_argument("--history", action="store_true", help="Искать по всем версиям.")
+    search.add_argument(
+        "--semantic",
+        action="store_true",
+        help="Гибридный поиск: FTS + семантика (RRF).",
+    )
+    search.add_argument(
+        "--mode",
+        choices=["fts", "semantic", "hybrid"],
+        default=None,
+        help="Режим поиска: fts, semantic или hybrid.",
+    )
 
     links = add("links", "исходящие ссылки")
     links.add_argument("path")
@@ -515,6 +526,7 @@ def _run(args: argparse.Namespace) -> Any:
                 batch_id=args.batch_id,
             )
         if command == "search":
+            mode = args.mode or ("hybrid" if args.semantic else "fts")
             return service.search(
                 token,
                 args.query,
@@ -528,6 +540,7 @@ def _run(args: argparse.Namespace) -> Any:
                 limit=args.limit,
                 offset=args.offset,
                 history=args.history,
+                mode=mode,
             )
         if command == "links":
             return service.links(token, args.path, version=args.version)
