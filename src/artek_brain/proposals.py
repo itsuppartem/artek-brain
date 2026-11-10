@@ -579,6 +579,13 @@ class ProposalStore:
             )
         if content is None:
             return
+        with self.store._lock:
+            self.store._ensure_open()
+            exists = self.store._conn.execute(
+                "SELECT 1 FROM versions WHERE path=? LIMIT 1", (path,)
+            ).fetchone()
+        if exists is None:
+            return
         digest = _sha256(content)
         with self.store._lock:
             self.store._ensure_open()
