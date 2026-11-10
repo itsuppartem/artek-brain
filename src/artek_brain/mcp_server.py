@@ -74,7 +74,10 @@ _TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "brain_search",
-        "description": "Полнотекстовый поиск с фильтрами и пагинацией.",
+        "description": (
+            "Поиск с фильтрами и пагинацией: mode=fts (по умолчанию), "
+            "semantic или hybrid (FTS + семантика через RRF)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -89,6 +92,11 @@ _TOOL_DEFS: list[dict[str, Any]] = [
                 "limit": {"type": "integer"},
                 "offset": {"type": "integer"},
                 "history": {"type": "boolean"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["fts", "semantic", "hybrid"],
+                    "description": "Режим поиска, по умолчанию fts.",
+                },
                 "cursor": {"type": "string"},
             },
             "required": ["query"],
@@ -149,8 +157,8 @@ _ACTION_HELP: dict[str, tuple[str, str, str]] = {
     ),
     "search": (
         "Поиск. Параметры: query (обязателен), path_prefix, type, status, tags, "
-        "author, since, until, limit, offset, history.",
-        "brain_search(query=\"деплой\", path_prefix=\"docs\")",
+        "author, since, until, limit, offset, history, mode=fts|semantic|hybrid.",
+        "brain_search(query=\"деплой\", path_prefix=\"docs\", mode=\"hybrid\")",
         "Возвращает items (path, version, title, snippet), total, offset, has_more.",
     ),
     "ls": (
@@ -386,6 +394,13 @@ _ACTION_HELP: dict[str, tuple[str, str, str]] = {
         "brain_task(action=\"token_revoke\", token_id=3)",
         "Возвращает число отозванных.",
     ),
+    "quality": (
+        "Качество знаний: report, drift, dups, contradictions, queue. "
+        "В MCP это только справка; запускайте через CLI: "
+        "brain quality report|drift|dups|contradictions|queue.",
+        "brain quality report --json",
+        "Метрики: documents, coverage, freshness_overdue, stale, review_queue_open.",
+    ),
 }
 
 _ALIASES = {
@@ -499,6 +514,9 @@ class BrainMCP:
                 "",
                 "Остальное вызывается через brain_task(action=\"...\"):",
                 ", ".join(sorted(_MEMORY_ACTIONS | _TASK_ACTIONS)),
+                "",
+                "Качество знаний: brain_help(topic=\"quality\") и CLI "
+                "brain quality report|drift|dups|contradictions|queue.",
                 "",
                 "Пример: brain_help(topic=\"history\") покажет схему и пример.",
                 "Ответы ограничены по размеру; продолжение — по cursor.",
