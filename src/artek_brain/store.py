@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import threading
+import unicodedata
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -545,16 +546,27 @@ class Store:
                 "Пустой path.",
                 hint="Передайте логический путь, например docs/README.md.",
             )
+        value = unicodedata.normalize("NFKC", value)
         if value.startswith("/") or "\\" in value or "\x00" in value:
             raise ValidationError(
                 f"Недопустимый path {path!r}.",
                 hint="Путь должен быть относительным и через /, без .. и обратных слэшей.",
+            )
+        if any(ord(char) < 32 for char in value):
+            raise ValidationError(
+                f"Недопустимый path {path!r}.",
+                hint="Уберите управляющие символы из пути.",
             )
         parts = value.split("/")
         if any(part in ("", ".", "..") for part in parts):
             raise ValidationError(
                 f"Недопустимый path {path!r}.",
                 hint="Уберите пустые сегменты, . и .. из пути.",
+            )
+        if any(part.endswith((" ", ".")) for part in parts):
+            raise ValidationError(
+                f"Недопустимый path {path!r}.",
+                hint="Сегменты пути не должны заканчиваться пробелом или точкой.",
             )
         if len(value) > 1024:
             raise ValidationError(

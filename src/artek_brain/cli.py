@@ -181,6 +181,15 @@ def _parser() -> argparse.ArgumentParser:
     revoke.add_argument("--id", type=int, default=None, help="id токена.")
     revoke.add_argument("--value", default=None, help="Значение токена.")
     revoke.add_argument("--name", default=None, help="Отозвать все токены с именем.")
+    for action, text in (
+        ("suspend", "приостановить токен"),
+        ("resume", "снять приостановку токена"),
+    ):
+        item = token_sub.add_parser(action, help=text)
+        _add_common(item)
+        item.add_argument("--id", type=int, default=None, help="id токена.")
+        item.add_argument("--value", default=None, help="Значение токена.")
+        item.add_argument("--name", default=None, help="Имя токена.")
     token_list = token_sub.add_parser("list", help="список токенов")
     _add_common(token_list)
 
@@ -326,6 +335,48 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--session", default=None)
     export.add_argument("--model", default=None)
 
+    proposal = add("proposal", "предложения агентов и утверждение")
+    proposal_sub = proposal.add_subparsers(dest="proposal_command", required=True)
+    proposal_list = proposal_sub.add_parser("list", help="список предложений")
+    _add_common(proposal_list)
+    proposal_list.add_argument("--status", default=None, choices=["pending", "approved", "rejected"])
+    proposal_show = proposal_sub.add_parser("show", help="показать предложение")
+    _add_common(proposal_show)
+    proposal_show.add_argument("path")
+    proposal_approve = proposal_sub.add_parser("approve", help="утвердить предложение")
+    _add_common(proposal_approve)
+    proposal_approve.add_argument("path")
+    proposal_approve.add_argument("--to", dest="to", default=None, help="Целевой защищённый путь.")
+    proposal_approve.add_argument("--reason", default=None)
+    proposal_reject = proposal_sub.add_parser("reject", help="отклонить предложение")
+    _add_common(proposal_reject)
+    proposal_reject.add_argument("path")
+    proposal_reject.add_argument("--reason", default=None)
+    proposal_verify = proposal_sub.add_parser("verify", help="проверить дрейф approved/")
+    _add_common(proposal_verify)
+
+    run = add("run", "серверный прогон проверки по задаче")
+    run.add_argument("task", help="id задачи.")
+    run.add_argument("--command", default=None, help="Команда проверки.")
+    run.add_argument("--seeds", type=int, default=None)
+    run.add_argument("--timeout", type=float, default=None)
+    run.add_argument("--workdir", default=None)
+    run.add_argument("--hidden-command", dest="hidden_command", default=None)
+    run.add_argument("--list", dest="list_runs", action="store_true", help="Показать прогоны.")
+    run.add_argument("--limit", type=int, default=50)
+
+    anomaly = add("anomaly", "детекторы аномалий")
+    anomaly_sub = anomaly.add_subparsers(dest="anomaly_command", required=True)
+    anomaly_scan = anomaly_sub.add_parser("scan", help="найти аномалии")
+    _add_common(anomaly_scan)
+    anomaly_scan.add_argument("--auto-suspend", dest="auto_suspend", action="store_true", default=None)
+    anomaly_scan.add_argument("--no-auto-suspend", dest="auto_suspend", action="store_false")
+    anomaly_list = anomaly_sub.add_parser("list", help="список инцидентов")
+    _add_common(anomaly_list)
+    anomaly_list.add_argument("--actor", default=None)
+    anomaly_list.add_argument("--kind", default=None)
+    anomaly_list.add_argument("--limit", type=int, default=100)
+
     serve = add("serve", "запустить HTTP JSON API")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
@@ -425,6 +476,20 @@ def _run(args: argparse.Namespace) -> Any:
                 )
             if args.token_command == "revoke":
                 return service.token_revoke(
+                    token,
+                    token_id=args.id,
+                    value=args.value,
+                    name=args.name,
+                )
+            if args.token_command == "suspend":
+                return service.token_suspend(
+                    token,
+                    token_id=args.id,
+                    value=args.value,
+                    name=args.name,
+                )
+            if args.token_command == "resume":
+                return service.token_resume(
                     token,
                     token_id=args.id,
                     value=args.value,
@@ -574,6 +639,36 @@ def _run(args: argparse.Namespace) -> Any:
                 Path(args.output).write_text(data["content"], encoding="utf-8")
                 return {"path": args.path, "output": args.output}
             return data
+        if command == "proposal":
+            return service.proposal(
+                token,
+                args.proposal_command,
+                path=getattr(args, "path", None),
+                status=getattr(args, "status", None),
+                to=getattr(args, "to", None),
+                reason=getattr(args, "reason", None),
+            )
+        if command == "run":
+            if args.list_runs:
+                return service.run_list(token, task_id=args.task, limit=args.limit)
+            return service.run(
+                token,
+                args.task,
+                command=args.command,
+                seeds=args.seeds,
+                timeout=args.timeout,
+                workdir=args.workdir,
+                hidden_command=args.hidden_command,
+            )
+        if command == "anomaly":
+            if args.anomaly_command == "scan":
+                return service.anomaly_scan(token, auto_suspend=args.auto_suspend)
+            return service.anomaly_list(
+                token,
+                actor=args.actor,
+                kind=args.kind,
+                limit=args.limit,
+            )
         raise ArtekBrainError(f"Неизвестная команда «{command}».")
     finally:
         service.close()

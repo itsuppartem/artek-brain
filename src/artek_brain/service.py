@@ -13,9 +13,13 @@ from types import TracebackType
 from typing import Any, Iterable
 
 from .access import Access, IssuedToken, Principal
+from .anomaly import AnomalyConfig, AnomalyDetector
 from .brain import Brain
 from .errors import PermissionDenied, ValidationError
+from .evidence import EvidenceChecker
+from .proposals import ProposalStore
 from .quota import Quota
+from .runs import Runner
 from .store import Store
 from .tasks import TaskBoard
 
@@ -85,13 +89,31 @@ class Service:
         *,
         quota: Quota | None = None,
         max_claims: int = 2,
+        repo_root: str | Path | None = None,
     ) -> None:
         self.root = resolve_root(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.store = Store(self.root, quota=quota)
         self.access = Access.for_store(self.store)
         self.brain = Brain(self.store, self.access)
-        self.board = TaskBoard(self.store, max_claims=max_claims)
+        self.runs = Runner(
+            self.store,
+            workdir=repo_root or Path.cwd(),
+            hidden_dir=self.root / "hidden",
+        )
+        self.evidence = EvidenceChecker(
+            self.store,
+            runs=self.runs,
+            repo_root=repo_root or Path.cwd(),
+        )
+        self.board = TaskBoard(
+            self.store, max_claims=max_claims, evidence_checker=self.evidence
+        )
+        self.proposals = ProposalStore(self.store, self.access)
+        self.anomalies = AnomalyDetector(
+            self.store, access=self.access, board=self.board
+        )
+        self.brain.approval_guard = self.proposals.guard_write
 
     def __enter__(self) -> "Service":
         return self
@@ -175,6 +197,54 @@ class Service:
             return {"revoked": int(changed), "by": "name", "name": name}
         raise ValidationError(
             "Не указан токен для отзыва.",
+            hint="Передайте id, значение токена или имя.",
+        )
+
+    def token_suspend(
+        self,
+        token: str | None,
+        *,
+        token_id: int | None = None,
+        value: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Приостановить токен (только owner)."""
+        self._require_owner(token, "token_suspend")
+        if token_id is not None:
+            changed = self.access.suspend_by_id(int(token_id))
+            return {"suspended": int(bool(changed)), "by": "id", "id": int(token_id)}
+        if value:
+            changed = self.access.suspend(value)
+            return {"suspended": int(bool(changed)), "by": "value"}
+        if name:
+            changed = self.access.suspend_name(name)
+            return {"suspended": int(changed), "by": "name", "name": name}
+        raise ValidationError(
+            "Не указан токен для приостановки.",
+            hint="Передайте id, значение токена или имя.",
+        )
+
+    def token_resume(
+        self,
+        token: str | None,
+        *,
+        token_id: int | None = None,
+        value: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Снять приостановку токена (только owner)."""
+        self._require_owner(token, "token_resume")
+        if token_id is not None:
+            changed = self.access.resume_by_id(int(token_id))
+            return {"resumed": int(bool(changed)), "by": "id", "id": int(token_id)}
+        if value:
+            changed = self.access.resume(value)
+            return {"resumed": int(bool(changed)), "by": "value"}
+        if name:
+            changed = self.access.resume_name(name)
+            return {"resumed": int(changed), "by": "name", "name": name}
+        raise ValidationError(
+            "Не указан токен для снятия приостановки.",
             hint="Передайте id, значение токена или имя.",
         )
 
@@ -649,7 +719,7 @@ class Service:
                 self.board.submit(
                     str(task_id or ""),
                     name,
-                    evidence=params.get("evidence") or "",
+                    evidence=params.get("evidence"),
                     revision=int(_as_int(params.get("revision"), "revision") or 0),
                     token=params.get("claim_token"),
                     body=params.get("body"),
@@ -764,6 +834,146 @@ class Service:
                 "grant-role, revoke-role, roles, presence, agents, who-knows, "
                 "handoff, send, inbox, mark-read, brief."
             ),
+        )
+
+    # ------------------------------------------------------------------
+    # Предложения, прогоны и аномалии
+    # ------------------------------------------------------------------
+    def proposal(self, token: str | None, action: str, **params: Any) -> Any:
+        """Мультиплексор предложений: list, show, approve, reject, verify."""
+        action = str(action or "").strip().lower().replace("-", "_")
+        if action in ("list", "ls", ""):
+            return _jsonable(
+                self.proposals.list(
+                    token or "", status=params.get("status") or None
+                )
+            )
+        if action in ("show", "get"):
+            path = params.get("path") or params.get("target")
+            if not path:
+                raise ValidationError(
+                    "Не указан путь предложения.",
+                    hint="Передайте path вида proposals/<agent>/<файл>.",
+                )
+            return _jsonable(self.proposals.show(token or "", str(path)))
+        if action == "approve":
+            path = params.get("path") or params.get("target")
+            if not path:
+                raise ValidationError(
+                    "Не указан путь предложения.",
+                    hint="Передайте path предложения.",
+                )
+            return _jsonable(
+                self.proposals.approve(
+                    token or "",
+                    str(path),
+                    target=params.get("to") or params.get("approved_path"),
+                    reason=params.get("reason") or "утверждено ревьюером",
+                )
+            )
+        if action == "reject":
+            path = params.get("path") or params.get("target")
+            if not path:
+                raise ValidationError(
+                    "Не указан путь предложения.",
+                    hint="Передайте path предложения.",
+                )
+            return _jsonable(
+                self.proposals.reject(
+                    token or "", str(path), reason=params.get("reason") or ""
+                )
+            )
+        if action in ("verify", "drift"):
+            return {"drift": _jsonable(self.proposals.verify_approvals(token or ""))}
+        raise ValidationError(
+            f"Неизвестное действие предложения «{action}».",
+            hint="Допустимо: list, show, approve, reject, verify.",
+        )
+
+    def run(
+        self,
+        token: str | None,
+        task_id: str,
+        *,
+        command: str | None = None,
+        seeds: int | None = None,
+        timeout: float | None = None,
+        workdir: str | None = None,
+        hidden_command: str | None = None,
+    ) -> dict[str, Any]:
+        """Запустить проверку для задачи от имени токена и записать прогон."""
+        principal = self.principal(token)
+        task = self.board.show(task_id)
+        if principal.role not in ("owner", "human") and task.assignee != principal.name:
+            raise PermissionDenied(
+                "run",
+                task.id,
+                "write",
+                actor=principal.name,
+                reason="запускать проверку может арендатор задачи или owner",
+            )
+        area = task.area[0] if task.area else None
+        record = self.runs.run(
+            principal.name,
+            task_id=task.id,
+            area=area,
+            command=command,
+            seeds=seeds,
+            timeout=timeout,
+            workdir=workdir,
+            hidden_command=hidden_command,
+        )
+        return _jsonable(record)
+
+    def run_list(
+        self,
+        token: str | None,
+        *,
+        task_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Список прогонов (агент видит только свои)."""
+        principal = self.principal(token)
+        actor = None if principal.role in ("owner", "human", "auditor") else principal.name
+        return _jsonable(
+            self.runs.list(actor=actor, task_id=task_id, limit=limit)
+        )
+
+    def anomaly_scan(
+        self,
+        token: str | None,
+        *,
+        auto_suspend: bool | None = None,
+    ) -> dict[str, Any]:
+        """Найти аномалии (owner) и записать инциденты в очередь ревью."""
+        self._require_owner(token, "anomaly_scan")
+        incidents = self.anomalies.scan(auto_suspend=auto_suspend)
+        return {
+            "incidents": _jsonable(incidents),
+            "count": len(incidents),
+            "config": self.anomalies.config.as_dict(),
+        }
+
+    def anomaly_list(
+        self,
+        token: str | None,
+        *,
+        actor: str | None = None,
+        kind: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Список инцидентов: owner или auditor."""
+        principal = self.principal(token)
+        if principal.role not in ("owner", "auditor"):
+            raise PermissionDenied(
+                "anomaly_list",
+                None,
+                "audit",
+                actor=principal.name,
+                reason="инциденты доступны owner и auditor",
+            )
+        return _jsonable(
+            self.anomalies.incidents(actor=actor, kind=kind, limit=limit)
         )
 
     def _ensure_reviewer(self, principal: Principal) -> None:

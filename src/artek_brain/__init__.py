@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from . import frontmatter, secrets
 from .access import Access, IssuedToken, Principal, Scope, TokenRecord
+from .anomaly import AnomalyConfig, AnomalyDetector, Incident
 from .brain import Brain
 from .errors import (
     ArtekBrainError,
@@ -23,9 +24,12 @@ from .errors import (
     StoredDataError,
     ValidationError,
 )
+from .evidence import EvidenceChecker, EvidenceError, EvidenceReport, parse_evidence
 from .frontmatter import Frontmatter
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
+from .proposals import Approval, Proposal, ProposalStore
 from .quota import Quota
+from .runs import AreaConfig, RunRecord, Runner
 from .search import Search, SearchItem, SearchPage
 from .store import (
     AuditEntry,
@@ -92,6 +96,19 @@ __all__ = [
     "Frontmatter",
     "frontmatter",
     "secrets",
+    "ProposalStore",
+    "Proposal",
+    "Approval",
+    "EvidenceChecker",
+    "EvidenceReport",
+    "EvidenceError",
+    "parse_evidence",
+    "Runner",
+    "RunRecord",
+    "AreaConfig",
+    "AnomalyDetector",
+    "AnomalyConfig",
+    "Incident",
     "VersionInfo",
     "WriteResult",
     "ReadResult",

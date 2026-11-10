@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Sequence
 
-from .access import Access, Principal
+from .access import Access, Principal, is_hidden
 from .errors import PermissionDenied
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
 from .search import Search, SearchPage
@@ -30,6 +30,7 @@ class Brain:
         self.access = access
         self.search_engine = Search(store)
         self.nav = Nav(store)
+        self.approval_guard: Any = None
 
     def __enter__(self) -> "Brain":
         return self
@@ -200,6 +201,8 @@ class Brain:
         path = self._normalize(path)
         creating = not self._document_exists(path)
         principal = self._guard_write(token, "write", path, creating=creating)
+        if self.approval_guard is not None:
+            self.approval_guard(principal, path, content)
         result = self.store.write(
             path,
             content,
@@ -409,9 +412,29 @@ class Brain:
         action: str | None = None,
         since: str | None = None,
     ) -> list[AuditEntry]:
-        """Журнал аудита: owner или auditor."""
-        self._guard_journal(token, "audit")
-        return self.store.audit(limit=limit, actor=actor, action=action, since=since)
+        """Журнал аудита: owner или auditor; hidden скрыт от не-owner."""
+        principal = self._guard_journal(token, "audit")
+        entries = self.store.audit(limit=limit, actor=actor, action=action, since=since)
+        if principal.role == "owner":
+            return entries
+        result: list[AuditEntry] = []
+        for entry in entries:
+            if entry.path and is_hidden(entry.path):
+                result.append(
+                    AuditEntry(
+                        id=entry.id,
+                        ts=entry.ts,
+                        actor=entry.actor,
+                        action=entry.action,
+                        path=None,
+                        detail={"hidden": True},
+                        session=entry.session,
+                        model=entry.model,
+                    )
+                )
+            else:
+                result.append(entry)
+        return result
 
     def stats(self, token: str) -> dict[str, Any]:
         """Статистика хранилища: owner или auditor."""
