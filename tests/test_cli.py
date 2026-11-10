@@ -350,3 +350,65 @@ def test_cli_tasks_review_inbox_and_brief(tmp_path: Path) -> None:
     brief = _run(root, "brief", token=agent)
     assert brief.returncode == 0
     assert "Бриф для agent-1" in brief.stdout
+
+
+def test_cli_repack_requires_owner_and_is_idempotent(tmp_path: Path) -> None:
+    root = tmp_path / "brain"
+    owner = _init(root)
+    agent = _agent(root, owner)
+
+    def document(version: int) -> str:
+        lines = ["# A", "", f"Версия {version}.", ""]
+        for section in range(4):
+            lines += [f"## Раздел {section}", ""]
+            for line in range(15):
+                words = [
+                    f"слово{(section * 7 + line * 3 + offset) % 40}"
+                    for offset in range(16)
+                ]
+                lines.append(f"- {line}: " + " ".join(words))
+            lines.append("")
+        lines += ["## Меняется", "", f"значение {version}"]
+        return "\n".join(lines) + "\n"
+
+    for version in range(1, 6):
+        _json(
+            _run(
+                root,
+                "--json",
+                "write",
+                "docs/a.md",
+                "--reason",
+                f"v{version}",
+                *(
+                    []
+                    if version == 1
+                    else ["--base-version", str(version - 1)]
+                ),
+                token=owner,
+                stdin=document(version),
+            )
+        )
+
+    denied = _run(root, "repack", token=agent)
+    assert denied.returncode != 0
+    assert "owner" in denied.stderr
+
+    first = _json(
+        _run(root, "--json", "repack", "--snapshot-every", "2", token=owner)
+    )
+    assert first["versions"] == 5
+    assert first["rewritten"] > 0
+    assert first["deltas"] > 0
+
+    second = _json(
+        _run(root, "--json", "repack", "--snapshot-every", "2", token=owner)
+    )
+    assert second["rewritten"] == 0
+    assert second["deltas"] == first["deltas"]
+
+    history = _json(_run(root, "--json", "history", "docs/a.md", token=owner))
+    assert len(history) == 5
+    content = _run(root, "read", "docs/a.md", "--version", "2", token=owner)
+    assert content.returncode == 0
+    assert "значение 2" in content.stdout
