@@ -9,9 +9,14 @@ from __future__ import annotations
 from typing import Any, Iterable, Sequence
 
 from .access import Access, Principal
-from .errors import PermissionDenied
+from .errors import PermissionDenied, ValidationError
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
 from .search import Search, SearchPage
+from .semantic import (
+    SemanticDisabledError,
+    SemanticIndex,
+    hybrid_search as _hybrid_search,
+)
 from .store import (
     AuditEntry,
     ReadResult,
@@ -25,11 +30,22 @@ from .store import (
 class Brain:
     """Проверяющий права фасад над Store, поиском и навигацией."""
 
-    def __init__(self, store: Any, access: Access) -> None:
+    def __init__(
+        self,
+        store: Any,
+        access: Access,
+        *,
+        semantic: SemanticIndex | None = None,
+    ) -> None:
         self.store = store
         self.access = access
         self.search_engine = Search(store)
         self.nav = Nav(store)
+        self.semantic = (
+            semantic if semantic is not None else SemanticIndex.from_store(store)
+        )
+        if self.semantic is not None:
+            self.semantic.set_candidate_provider(self._semantic_candidates)
 
     def __enter__(self) -> "Brain":
         return self
@@ -38,8 +54,22 @@ class Brain:
         self.close()
 
     def close(self) -> None:
-        """Закрыть индекс поиска (Store и Access закрывает вызывающий)."""
-        self.search_engine.close()
+        """Закрыть индексы поиска (Store и Access закрывает вызывающий)."""
+        try:
+            self.search_engine.close()
+        finally:
+            if self.semantic is not None:
+                self.semantic.close()
+
+    def _semantic_candidates(self, query: str) -> list[str]:
+        """FTS-кандидаты для предфильтра большого семантического индекса."""
+        page = self.search_engine.search(query, limit=1000)
+        return [item.path for item in page.items]
+
+    def _update_semantic(self, path: str) -> None:
+        """Хук рядом с FTS: обновить семантический индекс, если он включён."""
+        if self.semantic is not None:
+            self.semantic.update(path)
 
     # ------------------------------------------------------------------
     # Проверки
@@ -212,6 +242,7 @@ class Brain:
             model=model,
         )
         self.search_engine.update(path)
+        self._update_semantic(path)
         return result
 
     def delete(
@@ -238,6 +269,7 @@ class Brain:
             model=model,
         )
         self.search_engine.update(path)
+        self._update_semantic(path)
         return result
 
     def restore(
@@ -264,6 +296,7 @@ class Brain:
             model=model,
         )
         self.search_engine.update(path)
+        self._update_semantic(path)
         return result
 
     def _deny_agent_rollback(
@@ -311,6 +344,7 @@ class Brain:
             model=model,
         )
         self.search_engine.update(path)
+        self._update_semantic(path)
         return result
 
     def rollback_author(
@@ -354,6 +388,7 @@ class Brain:
         )
         for item in result.rolled_back:
             self.search_engine.update(item.path)
+            self._update_semantic(item.path)
         return result
 
     def rollback_batch(
@@ -396,6 +431,7 @@ class Brain:
         )
         for item in result.rolled_back:
             self.search_engine.update(item.path)
+            self._update_semantic(item.path)
         return result
 
     # ------------------------------------------------------------------
@@ -476,9 +512,16 @@ class Brain:
         until: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        mode: str = "fts",
     ) -> SearchPage:
-        """Поиск по текущим версиям с фильтрами и правами."""
+        """Поиск по текущим версиям: fts, semantic или hybrid (RRF)."""
         doc_type = doc_type or type
+        mode = str(mode or "fts").strip().lower()
+        if mode not in ("fts", "semantic", "hybrid"):
+            raise ValidationError(
+                f"Неизвестный режим поиска «{mode}».",
+                hint="Допустимо: fts, semantic или hybrid.",
+            )
         principal = self._verify(token, "search", path_prefix)
         if principal.role == "auditor":
             exc = PermissionDenied(
@@ -491,19 +534,60 @@ class Brain:
             self._deny("search", path_prefix, exc)
             raise exc
         self._check_prefix(principal, path_prefix, action="search")
-        return self.search_engine.search(
-            query,
-            path_prefix=path_prefix,
-            doc_type=doc_type,
-            status=status,
-            tags=tags,
-            author=author,
-            since=since,
-            until=until,
-            limit=limit,
-            offset=offset,
-            can_read=principal.can_read,
-        )
+        common = {
+            "path_prefix": path_prefix,
+            "doc_type": doc_type,
+            "status": status,
+            "tags": tags,
+            "author": author,
+            "since": since,
+            "until": until,
+            "limit": limit,
+            "offset": offset,
+            "can_read": principal.can_read,
+        }
+        if mode == "fts":
+            return self.search_engine.search(query, **common)
+        if self.semantic is None:
+            raise SemanticDisabledError(
+                "Семантический поиск выключен в настройках хранилища.",
+                hint=(
+                    "Включите блок semantic в settings.json "
+                    "(enabled=true, embedder=hash или ollama) и пересоздайте Brain."
+                ),
+            )
+        if mode == "semantic":
+            return self.semantic.search(query, **common)
+        return _hybrid_search(self.search_engine, self.semantic, query, **common)
+
+    def semantic_search(self, token: str, query: str, **params: Any) -> SearchPage:
+        """Семантический поиск через фасад Brain."""
+        return self.search(token, query, mode="semantic", **params)
+
+    def hybrid_search(self, token: str, query: str, **params: Any) -> SearchPage:
+        """Гибридный поиск (FTS + семантика, RRF) через фасад Brain."""
+        return self.search(token, query, mode="hybrid", **params)
+
+    def reindex_semantic(self, token: str) -> dict[str, Any]:
+        """Перестроить семантический индекс (только owner)."""
+        principal = self._verify(token, "reindex_semantic", None)
+        if principal.role != "owner":
+            exc = PermissionDenied(
+                "reindex_semantic",
+                None,
+                "owner",
+                actor=principal.name,
+                reason="перестройка семантического индекса доступна только owner",
+            )
+            self._deny("reindex_semantic", None, exc)
+            raise exc
+        if self.semantic is None:
+            raise SemanticDisabledError(
+                "Семантический поиск выключен в настройках хранилища.",
+                hint="Включите semantic в settings.json и пересоздайте Brain.",
+            )
+        chunks = self.semantic.reindex()
+        return {"chunks": chunks, **self.semantic.stats()}
 
     def search_history(
         self,
