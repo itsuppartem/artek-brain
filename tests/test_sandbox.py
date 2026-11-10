@@ -105,10 +105,11 @@ print('\\n'.join(checks))
 """
     result = service.sandbox_run(agent, script, "python", inputs={"prefix": "docs"})
     assert result["exit_code"] == 0, result["stderr"]
+    lines = result["stdout"].splitlines()
     assert "LEAK" not in result["stdout"]
     assert "WRITE" not in result["stdout"]
-    assert result["stdout"].count("blocked") == 3
-    assert result["stdout"].count("ro") == 3
+    assert sum(1 for line in lines if line.startswith("blocked ")) == 3
+    assert sum(1 for line in lines if line.startswith("ro ")) == 3
     assert [item["name"] for item in result["out"]] == ["ok.txt"]
 
 
