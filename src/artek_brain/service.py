@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from .access import Access, IssuedToken, Principal
 from .anomaly import AnomalyConfig, AnomalyDetector
@@ -22,8 +22,36 @@ from .proposals import ProposalStore
 from .quota import Quota
 from .review_queue import ReviewQueue
 from .runs import Runner
+from .registry import Registry
+from .sandbox import Sandbox, SandboxConfig, SandboxLimits
 from .store import Store
 from .tasks import TaskBoard
+
+_SANDBOX_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "script": {"type": "string", "description": "Текст скрипта."},
+        "language": {
+            "type": "string",
+            "enum": ["python", "shell"],
+            "description": "Язык: python или shell.",
+        },
+        "inputs": {
+            "type": "object",
+            "description": (
+                "Срез данных: prefix или paths; необязательные "
+                "max_documents и max_bytes."
+            ),
+        },
+        "limits": {
+            "type": "object",
+            "description": "Лимиты запуска в пределах потолка роли.",
+        },
+        "cache": {"type": "boolean", "description": "Вернуть кэш по hash+срезу."},
+    },
+    "required": ["script"],
+    "additionalProperties": False,
+}
 
 DEFAULT_ROOT = ".brain"
 
@@ -139,6 +167,20 @@ class Service:
             self.store, access=self.access, board=self.board
         )
         self.brain.approval_guard = self.proposals.guard_write
+        self.sandbox = Sandbox(SandboxConfig(), self.store, self.access)
+        self.registry = Registry(self.store, self.access)
+        self.registry.register(
+            "sandbox.run",
+            (
+                "Выполнить Python или shell скрипт в изолированной песочнице "
+                "рядом с read-only срезом памяти. Сеть выключена, секреты "
+                "хоста не видны, вывод и файлы /out ограничены."
+            ),
+            _SANDBOX_SCHEMA,
+            min_role="agent",
+            daily_limit=100,
+            handler=self._sandbox_handler,
+        )
 
     def __enter__(self) -> "Service":
         return self
@@ -152,14 +194,20 @@ class Service:
         self.close()
 
     def close(self) -> None:
-        """Закрыть поисковый индекс, токены и хранилище."""
+        """Закрыть песочницу, реестр, индекс, токены и хранилище."""
         try:
-            self.brain.close()
+            self.sandbox.shutdown()
         finally:
             try:
-                self.access.close()
+                self.registry.close()
             finally:
-                self.store.close()
+                try:
+                    self.brain.close()
+                finally:
+                    try:
+                        self.access.close()
+                    finally:
+                        self.store.close()
 
     # ------------------------------------------------------------------
     # Токены
@@ -673,6 +721,57 @@ class Service:
         """Кто последним менял путь."""
         self.principal(token)
         return _jsonable(self.board.who_knows(path))
+
+    # ------------------------------------------------------------------
+    # Песочница и реестр инструментов
+    # ------------------------------------------------------------------
+    def _sandbox_handler(self, token: str, args: Mapping[str, Any]) -> Any:
+        return self.sandbox.run(
+            args.get("script", ""),
+            args.get("language", "python"),
+            token,
+            inputs=args.get("inputs"),
+            limits=args.get("limits"),
+            cache=bool(args.get("cache", False)),
+        )
+
+    def sandbox_run(
+        self,
+        token: str | None,
+        script: str,
+        language: str = "python",
+        *,
+        inputs: Any = None,
+        limits: Mapping[str, Any] | None = None,
+        cache: bool = False,
+    ) -> dict[str, Any]:
+        """Выполнить скрипт в песочнице через реестр инструментов."""
+        return _jsonable(
+            self.registry.call(
+                "sandbox.run",
+                {
+                    "script": script,
+                    "language": language,
+                    "inputs": inputs,
+                    "limits": limits,
+                    "cache": cache,
+                },
+                token or "",
+            )
+        )
+
+    def sandbox_status(self, token: str | None, job_id: str) -> dict[str, Any]:
+        """Состояние запуска песочницы по id."""
+        return _jsonable(self.sandbox.status(token or "", job_id))
+
+    def sandbox_cancel(self, token: str | None, job_id: str) -> dict[str, Any]:
+        """Отменить запуск песочницы по id."""
+        return _jsonable(self.sandbox.cancel(token or "", job_id))
+
+    def tool_list(self, token: str | None) -> list[dict[str, Any]]:
+        """Список зарегистрированных инструментов без секретов."""
+        self.principal(token)
+        return _jsonable(self.registry.list_tools())
 
     # ------------------------------------------------------------------
     # Доска задач, inbox и бриф
