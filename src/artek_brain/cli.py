@@ -1,0 +1,631 @@
+"""CLI Artek Brain: тонкая оболочка над фасадом Brain и TaskBoard."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+from .errors import ArtekBrainError, PermissionDenied
+from .service import Service, resolve_root
+
+PROG = "brain"
+
+
+def _add_common(parser: argparse.ArgumentParser, *, top: bool = False) -> None:
+    """Добавить общие флаги. В подкомандах значения не затирают верхние."""
+    default = None if top else argparse.SUPPRESS
+    parser.add_argument(
+        "--root",
+        default=default,
+        help="Каталог хранилища (по умолчанию BRAIN_HOME или ./.brain).",
+    )
+    parser.add_argument(
+        "--token",
+        default=default,
+        help="Токен доступа (по умолчанию BRAIN_TOKEN).",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False if top else argparse.SUPPRESS,
+        help="Машинный вывод JSON.",
+    )
+
+
+def _token(args: argparse.Namespace) -> str | None:
+    return (
+        getattr(args, "token", None)
+        or os.environ.get("BRAIN_TOKEN")
+        or None
+    )
+
+
+def _read_content(args: argparse.Namespace) -> str:
+    if getattr(args, "content", None) is not None:
+        return args.content
+    filename = getattr(args, "file", None)
+    if filename and filename != "-":
+        return Path(filename).read_text(encoding="utf-8")
+    return sys.stdin.read()
+
+
+def _print_json(data: Any) -> None:
+    print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+
+
+def _print_text(command: str, data: Any) -> None:
+    if data is None:
+        print("нет данных")
+        return
+    if isinstance(data, str):
+        print(data)
+        return
+    if command == "read" and isinstance(data, dict):
+        print(data.get("content", ""), end="")
+        return
+    if command == "export" and isinstance(data, dict):
+        print(data.get("content", ""), end="")
+        return
+    if command == "diff" and isinstance(data, dict):
+        print(data.get("diff", ""), end="")
+        return
+    if command == "search" and isinstance(data, dict):
+        items = data.get("items", [])
+        print(f"Найдено: {data.get('total', len(items))}")
+        for item in items:
+            print(f"- {item['path']} v{item['version']} ({item['author']}) {item['title']}")
+            snippet = item.get("snippet") or ""
+            if snippet:
+                print(f"  {snippet}")
+        return
+    if command in ("ls", "tree") and isinstance(data, dict):
+        for node in data.get("nodes", []):
+            mark = "/" if node.get("kind") == "dir" else ""
+            print(f"{node['path']}{mark}  v{node.get('versions', 0)}  {node.get('size', 0)}b")
+        return
+    if command == "history" and isinstance(data, list):
+        for item in data:
+            print(
+                f"v{item['n']}  {item['ts']}  {item['author']}  {item.get('op')}  "
+                f"{item.get('reason') or ''}"
+            )
+        return
+    if command == "blame" and isinstance(data, list):
+        for item in data:
+            print(f"{'#' * item['level']} {item['title']}  v{item['version']}  {item['author']}")
+        return
+    if command == "tokens" and isinstance(data, list):
+        for item in data:
+            state = "revoked" if item.get("revoked_at") else "active"
+            scopes = ", ".join(
+                f"{scope['prefix']}:{scope['level']}" for scope in item.get("scopes", [])
+            )
+            print(f"#{item['id']}  {item['name']}  {item['role']}  {state}  {scopes}")
+        return
+    if command == "changes" and isinstance(data, dict):
+        for item in data.get("items", []):
+            print(f"{item['ts']}  {item['actor']}  {item['action']}  {item.get('path') or ''}")
+        print(f"next_cursor={data.get('next_cursor')}")
+        return
+    if command == "audit" and isinstance(data, list):
+        for item in data:
+            print(f"{item['ts']}  {item['actor']}  {item['action']}  {item.get('path') or ''}")
+        return
+    if command == "task" and isinstance(data, list):
+        for item in data:
+            print(
+                f"{item['id']}  [{item['status']}] p{item['priority']}  "
+                f"{item['title']}  ({item.get('assignee') or 'свободна'})"
+            )
+        return
+    if command == "task" and isinstance(data, dict) and "id" in data:
+        print(
+            f"{data['id']}  [{data['status']}] p{data['priority']}  "
+            f"revision={data['revision']}  {data['title']}"
+        )
+        if data.get("assignee"):
+            print(f"assignee: {data['assignee']}")
+        if data.get("body"):
+            print(data["body"])
+        return
+    if command == "inbox" and isinstance(data, list):
+        for item in data:
+            mark = " " if item.get("read") else "*"
+            print(f"{mark}#{item['id']}  {item['ts']}  от {item['sender']}: {item['subject']}")
+        return
+    if command == "brief" and isinstance(data, dict):
+        print(data.get("brief", ""))
+        return
+    if command == "token-create" and isinstance(data, dict):
+        print(data.get("token", ""))
+        return
+    _print_json(data)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="Artek Brain: общая память, поиск и доска задач.",
+    )
+    _add_common(parser, top=True)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add(name: str, help_text: str) -> argparse.ArgumentParser:
+        item = sub.add_parser(name, help=help_text)
+        _add_common(item)
+        return item
+
+    init = add("init", "инициализировать хранилище и выдать owner-токен")
+    init.add_argument("--owner-name", default="owner", help="Имя owner-токена.")
+    init.add_argument("--force", action="store_true", help="Создать токен даже если owner уже есть.")
+
+    token = add("token", "управление токенами")
+    token_sub = token.add_subparsers(dest="token_command", required=True)
+    create = token_sub.add_parser("create", help="создать токен")
+    _add_common(create)
+    create.add_argument("--name", required=True, help="Имя агента/токена.")
+    create.add_argument("--role", default="agent", choices=["owner", "human", "agent", "auditor"])
+    create.add_argument(
+        "--scope",
+        action="append",
+        default=None,
+        help="Право вида docs:write или docs:read; можно повторять.",
+    )
+    create.add_argument("--ttl", type=float, default=None, help="Срок жизни в секундах.")
+    revoke = token_sub.add_parser("revoke", help="отозвать токен")
+    _add_common(revoke)
+    revoke.add_argument("--id", type=int, default=None, help="id токена.")
+    revoke.add_argument("--value", default=None, help="Значение токена.")
+    revoke.add_argument("--name", default=None, help="Отозвать все токены с именем.")
+    token_list = token_sub.add_parser("list", help="список токенов")
+    _add_common(token_list)
+
+    ls = add("ls", "список каталога")
+    ls.add_argument("prefix", nargs="?", default="")
+    ls.add_argument("--tree", action="store_true", help="Показать дерево.")
+    ls.add_argument("--max-depth", type=int, default=None)
+
+    tree = add("tree", "дерево памяти")
+    tree.add_argument("prefix", nargs="?", default="")
+    tree.add_argument("--max-depth", type=int, default=None)
+
+    read = add("read", "прочитать документ")
+    read.add_argument("path")
+    read.add_argument("--version", type=int, default=None)
+    read.add_argument("--section", default=None)
+    read.add_argument("--lines", default=None, help="Диапазон строк START:END.")
+    read.add_argument("--max-chars", type=int, default=None)
+    read.add_argument("--session", default=None)
+    read.add_argument("--model", default=None)
+    read.add_argument("--output", default=None, help="Записать содержимое в файл.")
+
+    write = add("write", "записать документ из файла или stdin")
+    write.add_argument("path")
+    write.add_argument("--file", default=None, help="Файл с содержимым; - значит stdin.")
+    write.add_argument("--content", default=None, help="Содержимое строкой.")
+    write.add_argument("--reason", required=True)
+    write.add_argument("--base-version", type=int, default=None)
+    write.add_argument("--expected-sha256", default=None)
+    write.add_argument("--batch", dest="batch_id", default=None)
+    write.add_argument("--session", default=None)
+    write.add_argument("--model", default=None)
+
+    diff = add("diff", "сравнить версии")
+    diff.add_argument("path")
+    diff.add_argument("--from", dest="a", type=int, default=None)
+    diff.add_argument("--to", dest="b", type=int, default=None)
+
+    history = add("history", "история версий")
+    history.add_argument("path")
+    history.add_argument("--limit", type=int, default=50)
+    history.add_argument("--offset", type=int, default=0)
+
+    blame = add("blame", "авторы разделов")
+    blame.add_argument("path")
+
+    rollback = add("rollback", "откат версии, автора или пачки")
+    rollback.add_argument("path", nargs="?", default=None)
+    rollback.add_argument("--path", dest="path_opt", default=None)
+    rollback.add_argument("--to", dest="to_version", type=int, default=None)
+    rollback.add_argument("--author", default=None)
+    rollback.add_argument("--since", default=None)
+    rollback.add_argument("--until", default=None)
+    rollback.add_argument("--batch", dest="batch_id", default=None)
+    rollback.add_argument("--reason", required=True)
+
+    delete = add("delete", "мягко удалить документ")
+    _add_delete_flags(delete)
+
+    restore = add("restore", "восстановить документ")
+    _add_delete_flags(restore)
+
+    search = add("search", "полнотекстовый поиск")
+    search.add_argument("query")
+    search.add_argument("--prefix", dest="path_prefix", default=None)
+    search.add_argument("--type", dest="doc_type", default=None)
+    search.add_argument("--status", default=None)
+    search.add_argument("--tag", dest="tags", action="append", default=None)
+    search.add_argument("--author", default=None)
+    search.add_argument("--since", default=None)
+    search.add_argument("--until", default=None)
+    search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--offset", type=int, default=0)
+    search.add_argument("--history", action="store_true", help="Искать по всем версиям.")
+
+    links = add("links", "исходящие ссылки")
+    links.add_argument("path")
+    links.add_argument("--version", type=int, default=None)
+
+    backlinks = add("backlinks", "обратные ссылки")
+    backlinks.add_argument("path")
+
+    changes = add("changes", "лента изменений")
+    changes.add_argument("--cursor", type=int, default=None)
+    changes.add_argument("--limit", type=int, default=100)
+
+    audit = add("audit", "журнал аудита")
+    audit.add_argument("--limit", type=int, default=100)
+    audit.add_argument("--actor", default=None)
+    audit.add_argument("--action", default=None)
+    audit.add_argument("--since", default=None)
+
+    add("stats", "статистика хранилища")
+
+    task = add("task", "операции доски задач")
+    task.add_argument("action", help="create, list, show, claim, start, ...")
+    task.add_argument("target", nargs="?", default=None, help="id задачи, если нужен.")
+    task.add_argument("--title", default=None)
+    task.add_argument("--body", default=None)
+    task.add_argument("--area", action="append", default=None)
+    task.add_argument("--priority", type=int, default=None)
+    task.add_argument("--depends-on", dest="depends_on", action="append", default=None)
+    task.add_argument("--key", default=None)
+    task.add_argument("--revision", type=int, default=None)
+    task.add_argument("--minutes", type=int, default=None)
+    task.add_argument("--claim-token", default=None)
+    task.add_argument("--evidence", default=None)
+    task.add_argument("--note", default=None)
+    task.add_argument("--reason", default=None)
+    task.add_argument("--status", default=None)
+    task.add_argument("--assignee", default=None)
+    task.add_argument("--limit", type=int, default=None)
+    task.add_argument("--offset", type=int, default=None)
+    task.add_argument("--actor", default=None)
+    task.add_argument("--role", default=None)
+    task.add_argument("--activity", default=None)
+    task.add_argument("--ttl", dest="ttl_seconds", type=int, default=None)
+    task.add_argument("--to", default=None)
+    task.add_argument("--subject", default=None)
+    task.add_argument("--message-id", dest="message_id", action="append", type=int, default=None)
+    task.add_argument("--unread", action="store_true")
+    task.add_argument("--path", default=None)
+    task.add_argument("--done", default=None)
+    task.add_argument("--left", default=None)
+    task.add_argument("--important", default=None)
+    task.add_argument("--name", default=None)
+
+    inbox = add("inbox", "входящие: list, send, read")
+    inbox.add_argument("action", nargs="?", default="list")
+    inbox.add_argument("--unread", action="store_true")
+    inbox.add_argument("--to", default=None)
+    inbox.add_argument("--subject", default=None)
+    inbox.add_argument("--body", default=None)
+    inbox.add_argument("--message-id", dest="message_id", action="append", type=int, default=None)
+
+    brief = add("brief", "бриф для агента")
+    brief.add_argument("--limit", type=int, default=2000)
+
+    export = add("export", "экспорт Markdown")
+    export.add_argument("path")
+    export.add_argument("--version", type=int, default=None)
+    export.add_argument("--output", default=None)
+    export.add_argument("--session", default=None)
+    export.add_argument("--model", default=None)
+
+    serve = add("serve", "запустить HTTP JSON API")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--max-body", type=int, default=1024 * 1024)
+
+    mcp = add("mcp", "запустить MCP stdio сервер")
+    mcp.add_argument("--max-chars", type=int, default=8000)
+
+    return parser
+
+
+def _add_delete_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("path")
+    parser.add_argument("--reason", required=True)
+    parser.add_argument("--base-version", type=int, default=None)
+    parser.add_argument("--batch", dest="batch_id", default=None)
+
+
+def _parse_lines(value: str | None) -> tuple[int | None, int | None]:
+    if not value:
+        return None, None
+    parts = value.replace("-", ":").split(":")
+    if len(parts) != 2:
+        raise ValueError("Диапазон строк задаётся как START:END, например 10:20.")
+    return int(parts[0]), int(parts[1])
+
+
+def _task_params(args: argparse.Namespace) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    names = (
+        "title", "body", "area", "priority", "depends_on", "key", "revision",
+        "minutes", "claim_token", "evidence", "note", "reason", "status",
+        "assignee", "limit", "offset", "actor", "role", "activity",
+        "ttl_seconds", "to", "subject", "message_id", "unread", "path",
+        "done", "left", "important", "name",
+    )
+    for name in names:
+        value = getattr(args, name, None)
+        if value is not None:
+            params[name] = value
+    if getattr(args, "target", None):
+        params["task_id"] = args.target
+    return params
+
+
+def _run(args: argparse.Namespace) -> Any:
+    root = resolve_root(getattr(args, "root", None))
+    command = args.command
+    token = _token(args)
+
+    if command == "serve":
+        from .http_api import serve
+
+        service = Service(root)
+        try:
+            serve(
+                service,
+                host=args.host,
+                port=args.port,
+                max_body=args.max_body,
+            )
+        finally:
+            service.close()
+        return None
+
+    if command == "mcp":
+        from .mcp_server import run_stdio
+
+        service = Service(root)
+        try:
+            run_stdio(service, token, max_response_chars=args.max_chars)
+        finally:
+            service.close()
+        return None
+
+    service = Service(root)
+    try:
+        if command == "init":
+            tokens = [
+                item for item in service.access.list_tokens() if item.role == "owner"
+            ]
+            if tokens and not args.force:
+                raise ArtekBrainError(
+                    f"Хранилище уже инициализировано: {root}.",
+                    hint="Создайте токен через brain token create или передайте --force.",
+                )
+            issued = service.access.create_token(args.owner_name, "owner")
+            return {"root": str(root), **_json_issued(issued)}
+        if command == "token":
+            if args.token_command == "create":
+                return service.token_create(
+                    token,
+                    args.name,
+                    role=args.role,
+                    scopes=args.scope,
+                    ttl=args.ttl,
+                )
+            if args.token_command == "revoke":
+                return service.token_revoke(
+                    token,
+                    token_id=args.id,
+                    value=args.value,
+                    name=args.name,
+                )
+            return service.token_list(token)
+        if command in ("ls", "tree"):
+            return service.ls(
+                token,
+                args.prefix,
+                tree=(command == "tree" or args.tree),
+                max_depth=args.max_depth,
+            )
+        if command == "read":
+            start, end = _parse_lines(args.lines)
+            data = service.read(
+                token,
+                args.path,
+                version=args.version,
+                section=args.section,
+                line_start=start,
+                line_end=end,
+                max_chars=args.max_chars,
+                session=args.session,
+                model=args.model,
+            )
+            if args.output:
+                Path(args.output).write_text(data["content"], encoding="utf-8")
+                return {"path": args.path, "output": args.output}
+            return data
+        if command == "write":
+            content = _read_content(args)
+            return service.write(
+                token,
+                args.path,
+                content,
+                args.reason,
+                base_version=args.base_version,
+                expected_sha256=args.expected_sha256,
+                batch_id=args.batch_id,
+                session=args.session,
+                model=args.model,
+            )
+        if command == "diff":
+            return service.diff(token, args.path, a=args.a, b=args.b)
+        if command == "history":
+            return service.history(
+                token, args.path, limit=args.limit, offset=args.offset
+            )
+        if command == "blame":
+            return service.blame(token, args.path)
+        if command == "rollback":
+            path = args.path or args.path_opt
+            if args.batch_id:
+                return service.rollback_batch(
+                    token, args.batch_id, args.reason
+                )
+            if args.author:
+                return service.rollback_author(
+                    token,
+                    args.author,
+                    since=args.since,
+                    until=args.until,
+                    reason=args.reason,
+                )
+            if path is None or args.to_version is None:
+                raise ArtekBrainError(
+                    "Не указан способ отката.",
+                    hint="Передайте PATH и --to, либо --author, либо --batch.",
+                )
+            return service.rollback_version(
+                token, path, args.to_version, args.reason
+            )
+        if command == "delete":
+            return service.delete(
+                token,
+                args.path,
+                args.reason,
+                base_version=args.base_version,
+                batch_id=args.batch_id,
+            )
+        if command == "restore":
+            return service.restore(
+                token,
+                args.path,
+                args.reason,
+                base_version=args.base_version,
+                batch_id=args.batch_id,
+            )
+        if command == "search":
+            return service.search(
+                token,
+                args.query,
+                path_prefix=args.path_prefix,
+                doc_type=args.doc_type,
+                status=args.status,
+                tags=args.tags,
+                author=args.author,
+                since=args.since,
+                until=args.until,
+                limit=args.limit,
+                offset=args.offset,
+                history=args.history,
+            )
+        if command == "links":
+            return service.links(token, args.path, version=args.version)
+        if command == "backlinks":
+            return service.backlinks(token, args.path)
+        if command == "changes":
+            return service.changes(token, cursor=args.cursor, limit=args.limit)
+        if command == "audit":
+            return service.audit(
+                token,
+                limit=args.limit,
+                actor=args.actor,
+                action=args.action,
+                since=args.since,
+            )
+        if command == "stats":
+            return service.stats(token)
+        if command == "task":
+            return service.task(token, args.action, **_task_params(args))
+        if command == "inbox":
+            params = {
+                key: value
+                for key, value in (
+                    ("unread", args.unread or None),
+                    ("to", args.to),
+                    ("subject", args.subject),
+                    ("body", args.body),
+                    ("message_id", args.message_id),
+                )
+                if value is not None
+            }
+            return service.inbox(token, args.action, **params)
+        if command == "brief":
+            return service.brief(token, limit=args.limit)
+        if command == "export":
+            data = service.export(
+                token,
+                args.path,
+                version=args.version,
+                session=args.session,
+                model=args.model,
+            )
+            if args.output:
+                Path(args.output).write_text(data["content"], encoding="utf-8")
+                return {"path": args.path, "output": args.output}
+            return data
+        raise ArtekBrainError(f"Неизвестная команда «{command}».")
+    finally:
+        service.close()
+
+
+def _json_issued(issued: Any) -> dict[str, Any]:
+    return json.loads(json.dumps(issued.as_dict(), ensure_ascii=False, default=str))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Точка входа CLI. Возвращает код возврата."""
+    parser = _parser()
+    args = parser.parse_args(argv)
+    try:
+        data = _run(args)
+    except PermissionDenied as exc:
+        _error(args, exc)
+        return 3 if exc.action == "authenticate" else 1
+    except ArtekBrainError as exc:
+        _error(args, exc)
+        return 1
+    except (OSError, ValueError) as exc:
+        _error(args, exc)
+        return 1
+    if data is None:
+        return 0
+    if getattr(args, "json", False):
+        _print_json(data)
+    else:
+        _print_text(_output_command(args), data)
+    return 0
+
+
+def _output_command(args: argparse.Namespace) -> str:
+    if args.command == "token":
+        return "tokens" if args.token_command == "list" else "token-create"
+    return args.command
+
+
+def _error(args: argparse.Namespace, exc: Exception) -> None:
+    message = str(exc)
+    if getattr(args, "json", False):
+        payload = {
+            "ok": False,
+            "error": type(exc).__name__,
+            "message": message,
+            "hint": getattr(exc, "hint", None),
+        }
+        _print_json(payload)
+    else:
+        print(f"Ошибка: {message}", file=sys.stderr)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
