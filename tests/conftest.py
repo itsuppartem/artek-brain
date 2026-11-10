@@ -27,3 +27,27 @@ def small_quota() -> Quota:
         max_versions_per_document=3,
         max_writes_per_author_per_day=10,
     )
+
+
+@pytest.fixture()
+def access(tmp_path: Path):
+    """Отдельное хранилище токенов во временном каталоге."""
+    from artek_brain import Access
+
+    instance = Access(tmp_path / "access")
+    try:
+        yield instance
+    finally:
+        instance.close()
+
+
+@pytest.fixture()
+def brain(store: Store, access):
+    """Фасад Brain над чистым Store и Access."""
+    from artek_brain import Brain
+
+    instance = Brain(store, access)
+    try:
+        yield instance
+    finally:
+        instance.close()

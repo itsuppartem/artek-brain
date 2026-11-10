@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 from . import frontmatter, secrets
+from .access import Access, IssuedToken, Principal, Scope, TokenRecord
+from .brain import Brain
 from .errors import (
     ArtekBrainError,
     BaseVersionRequiredError,
@@ -15,13 +17,16 @@ from .errors import (
     InvalidVersionError,
     NotDeletedError,
     NotFoundError,
+    PermissionDenied,
     QuotaError,
     SecretDetectedError,
     StoredDataError,
     ValidationError,
 )
 from .frontmatter import Frontmatter
+from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
 from .quota import Quota
+from .search import Search, SearchItem, SearchPage
 from .store import (
     AuditEntry,
     GcResult,
@@ -40,6 +45,21 @@ __all__ = [
     "__version__",
     "Store",
     "Quota",
+    "Access",
+    "Brain",
+    "Search",
+    "Nav",
+    "Scope",
+    "Principal",
+    "IssuedToken",
+    "TokenRecord",
+    "SearchItem",
+    "SearchPage",
+    "Node",
+    "TocItem",
+    "Link",
+    "ChangesPage",
+    "ReadmeMap",
     "Frontmatter",
     "frontmatter",
     "secrets",
@@ -54,6 +74,7 @@ __all__ = [
     "ArtekBrainError",
     "ValidationError",
     "NotFoundError",
+    "PermissionDenied",
     "InvalidVersionError",
     "BaseVersionRequiredError",
     "DeletedError",
