@@ -133,6 +133,11 @@ def test_fork_bomb_hits_process_limit(svc) -> None:
     assert result["limit_reason"] == "processes"
     assert result["exit_code"] != 0
     assert result["duration_ms"] < 4000
+    scope = Path("/sys/fs/cgroup/system.slice") / f"brain-sbx-{result['id']}.scope"
+    deadline = time.time() + 5
+    while scope.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert not scope.exists(), "cgroup-scope песочницы остался после запуска"
 
 
 def test_infinite_loop_is_killed_by_wall_time(svc) -> None:
@@ -241,6 +246,17 @@ def test_bwrap_missing_refuses_to_run(svc) -> None:
     service, _, agent = svc
     sandbox = Sandbox(
         SandboxConfig(bwrap="/nonexistent/bwrap"), service.store, service.access
+    )
+    with pytest.raises(SandboxUnavailable):
+        sandbox.run("print('must not run')", "python", agent)
+
+
+def test_systemd_run_missing_refuses_to_run(svc) -> None:
+    service, _, agent = svc
+    sandbox = Sandbox(
+        SandboxConfig(systemd_run="/nonexistent/systemd-run"),
+        service.store,
+        service.access,
     )
     with pytest.raises(SandboxUnavailable):
         sandbox.run("print('must not run')", "python", agent)
