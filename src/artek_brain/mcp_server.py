@@ -394,6 +394,13 @@ _ACTION_HELP: dict[str, tuple[str, str, str]] = {
         "brain_task(action=\"token_revoke\", token_id=3)",
         "Возвращает число отозванных.",
     ),
+    "quality": (
+        "Качество знаний: report, drift, dups, contradictions, queue. "
+        "В MCP это только справка; запускайте через CLI: "
+        "brain quality report|drift|dups|contradictions|queue.",
+        "brain quality report --json",
+        "Метрики: documents, coverage, freshness_overdue, stale, review_queue_open.",
+    ),
 }
 
 _ALIASES = {
@@ -507,6 +514,9 @@ class BrainMCP:
                 "",
                 "Остальное вызывается через brain_task(action=\"...\"):",
                 ", ".join(sorted(_MEMORY_ACTIONS | _TASK_ACTIONS)),
+                "",
+                "Качество знаний: brain_help(topic=\"quality\") и CLI "
+                "brain quality report|drift|dups|contradictions|queue.",
                 "",
                 "Пример: brain_help(topic=\"history\") покажет схему и пример.",
                 "Ответы ограничены по размеру; продолжение — по cursor.",
