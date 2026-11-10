@@ -135,3 +135,38 @@ class FrontmatterError(ValidationError):
                 "строки key: value и списки вида [a, b]."
             ),
         )
+
+
+class PermissionDenied(ArtekBrainError):
+    """Недостаточно прав на действие или путь."""
+
+    def __init__(
+        self,
+        action: str,
+        path: str | None,
+        required: str,
+        *,
+        actor: str | None = None,
+        reason: str | None = None,
+        hint: str | None = None,
+    ) -> None:
+        self.action = action
+        self.path = path
+        self.required = required
+        self.actor = actor
+        self.reason = reason
+        where = f" на путь «{path}»" if path else ""
+        who = f" у «{actor}»" if actor else ""
+        message = (
+            f"Отказ: для действия «{action}»{where} нужно право «{required}»{who}."
+        )
+        if reason:
+            message += f" Причина: {reason}."
+        super().__init__(
+            message,
+            hint=hint
+            or (
+                "Запросите у владельца токен с нужным scope (префикс пути + "
+                "read/write/admin) или выполните действие другим токеном."
+            ),
+        )
