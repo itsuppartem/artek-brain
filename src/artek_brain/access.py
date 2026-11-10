@@ -12,6 +12,7 @@ import json
 import secrets
 import sqlite3
 import threading
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,9 +22,23 @@ from .errors import PermissionDenied, ValidationError
 
 ROLES = ("owner", "human", "agent", "auditor")
 LEVELS = {"read": 1, "write": 2, "admin": 3}
-_PROTECTED_PREFIXES = ("owner", "rules", "approved")
+_PROTECTED_PREFIXES = ("owner", "rules", "approved", "scoring", "hidden")
 _PROTECTED_EXACT = ("README", "README.md")
+_HIDDEN_PREFIX = "hidden"
 _INBOX_RE = r"owner/inbox/"
+
+# Похожие символы, которыми пытаются обойти проверку путей.
+_CONFUSABLES = str.maketrans(
+    {
+        "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h",
+        "о": "o", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
+        "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ɡ": "g", "ӏ": "l",
+        "α": "a", "β": "b", "ε": "e", "ι": "i", "κ": "k", "ν": "v",
+        "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x", "γ": "y",
+        "0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t",
+        "8": "b", "9": "g",
+    }
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tokens (
@@ -34,7 +49,8 @@ CREATE TABLE IF NOT EXISTS tokens (
     token_hash TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
     expires_at TEXT,
-    revoked_at TEXT
+    revoked_at TEXT,
+    suspended_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_name ON tokens(name);
 """
@@ -59,11 +75,35 @@ def _is_under(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
 
+def _policy_text(value: str) -> str:
+    """Привести путь к виду для проверки политики: NFKC, регистр, двойники."""
+    normalized = unicodedata.normalize("NFKC", str(value)).casefold()
+    return normalized.translate(_CONFUSABLES)
+
+
+def _policy_segments(path: str) -> list[str]:
+    """Сегменты пути после нормализации политики (без пустых)."""
+    return [part for part in _policy_text(path).split("/") if part not in ("", ".")]
+
+
 def is_protected(path: str) -> bool:
     """Защищён ли путь: писать может только owner (кроме owner/inbox)."""
-    if path in _PROTECTED_EXACT:
+    if not isinstance(path, str):
+        return False
+    segments = _policy_segments(path)
+    if not segments:
+        return False
+    if len(segments) == 1 and segments[0] in ("readme", "readme.md"):
         return True
-    return any(_is_under(path, prefix) for prefix in _PROTECTED_PREFIXES)
+    return segments[0] in {_policy_text(prefix) for prefix in _PROTECTED_PREFIXES}
+
+
+def is_hidden(path: str) -> bool:
+    """Относится ли путь к скрытому каталогу hidden/."""
+    if not isinstance(path, str):
+        return False
+    segments = _policy_segments(path)
+    return bool(segments) and segments[0] == _HIDDEN_PREFIX
 
 
 def is_inbox_path(path: str) -> bool:
@@ -101,11 +141,17 @@ class TokenRecord:
     created_at: str
     expires_at: str | None
     revoked_at: str | None
+    suspended_at: str | None = None
 
     @property
     def revoked(self) -> bool:
         """Отозван ли токен."""
         return self.revoked_at is not None
+
+    @property
+    def suspended(self) -> bool:
+        """Приостановлен ли токен."""
+        return self.suspended_at is not None
 
     def as_dict(self) -> dict[str, Any]:
         """Представить запись словарём."""
@@ -117,6 +163,7 @@ class TokenRecord:
             "created_at": self.created_at,
             "expires_at": self.expires_at,
             "revoked_at": self.revoked_at,
+            "suspended_at": self.suspended_at,
         }
 
 
@@ -162,6 +209,8 @@ class Principal:
         if self.role == "owner":
             return True
         if self.role == "auditor":
+            return False
+        if is_hidden(path):
             return False
         return self._has(path, "read")
 
@@ -275,6 +324,15 @@ class Access:
         self._conn.execute("PRAGMA busy_timeout=30000")
         with self._conn:
             self._conn.executescript(_SCHEMA)
+            self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        """Добавить новые колонки в старую базу без потери токенов."""
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(tokens)").fetchall()
+        }
+        if "suspended_at" not in columns:
+            self._conn.execute("ALTER TABLE tokens ADD COLUMN suspended_at TEXT")
 
     @classmethod
     def for_store(cls, store: Any) -> "Access":
@@ -371,6 +429,7 @@ class Access:
             created_at=_format_ts(now),
             expires_at=expires_at,
             revoked_at=None,
+            suspended_at=None,
         )
         return IssuedToken(token, record)
 
@@ -393,6 +452,9 @@ class Access:
             created_at=row["created_at"],
             expires_at=row["expires_at"],
             revoked_at=row["revoked_at"],
+            suspended_at=(
+                row["suspended_at"] if "suspended_at" in row.keys() else None
+            ),
         )
 
     def verify(self, token: str) -> Principal:
@@ -426,6 +488,17 @@ class Access:
                 "valid token",
                 actor=record.name,
                 reason="токен отозван",
+            )
+        if record.suspended_at is not None:
+            raise PermissionDenied(
+                "authenticate",
+                None,
+                "valid token",
+                actor=record.name,
+                reason=(
+                    "токен приостановлен из-за аномалии; "
+                    "снять приостановку может только owner"
+                ),
             )
         if record.expires_at is not None:
             try:
@@ -502,6 +575,104 @@ class Access:
                     (_format_ts(_utc_now()), name.strip()),
                 )
                 return int(cursor.rowcount)
+
+    def suspend_by_id(self, token_id: int) -> bool:
+        """Приостановить токен по id (снимает только owner через resume)."""
+        if not isinstance(token_id, int) or isinstance(token_id, bool):
+            raise ValidationError(
+                "token_id должен быть целым числом.",
+                hint="Возьмите id из list_tokens().",
+            )
+        with self._lock:
+            self._ensure_open()
+            with self._conn:
+                cursor = self._conn.execute(
+                    "UPDATE tokens SET suspended_at=? "
+                    "WHERE id=? AND revoked_at IS NULL AND suspended_at IS NULL",
+                    (_format_ts(_utc_now()), token_id),
+                )
+                return bool(cursor.rowcount)
+
+    def suspend_name(self, name: str) -> int:
+        """Приостановить все активные токены с именем. Число изменённых."""
+        if not isinstance(name, str) or not name.strip():
+            return 0
+        with self._lock:
+            self._ensure_open()
+            with self._conn:
+                cursor = self._conn.execute(
+                    "UPDATE tokens SET suspended_at=? "
+                    "WHERE name=? AND revoked_at IS NULL AND suspended_at IS NULL",
+                    (_format_ts(_utc_now()), name.strip()),
+                )
+                return int(cursor.rowcount)
+
+    def suspend(self, token: str | int | TokenRecord) -> bool:
+        """Приостановить токен по значению, id или записи."""
+        if isinstance(token, TokenRecord):
+            return self.suspend_by_id(token.id)
+        if isinstance(token, int) and not isinstance(token, bool):
+            return self.suspend_by_id(token)
+        if not isinstance(token, str) or not token.strip():
+            return False
+        with self._lock:
+            self._ensure_open()
+            with self._conn:
+                cursor = self._conn.execute(
+                    "UPDATE tokens SET suspended_at=? "
+                    "WHERE token_hash=? AND revoked_at IS NULL AND suspended_at IS NULL",
+                    (_format_ts(_utc_now()), _hash_token(token.strip())),
+                )
+                return bool(cursor.rowcount)
+
+    def resume_by_id(self, token_id: int) -> bool:
+        """Снять приостановку по id."""
+        if not isinstance(token_id, int) or isinstance(token_id, bool):
+            raise ValidationError(
+                "token_id должен быть целым числом.",
+                hint="Возьмите id из list_tokens().",
+            )
+        with self._lock:
+            self._ensure_open()
+            with self._conn:
+                cursor = self._conn.execute(
+                    "UPDATE tokens SET suspended_at=NULL "
+                    "WHERE id=? AND suspended_at IS NOT NULL",
+                    (token_id,),
+                )
+                return bool(cursor.rowcount)
+
+    def resume_name(self, name: str) -> int:
+        """Снять приостановку со всех токенов с именем. Число изменённых."""
+        if not isinstance(name, str) or not name.strip():
+            return 0
+        with self._lock:
+            self._ensure_open()
+            with self._conn:
+                cursor = self._conn.execute(
+                    "UPDATE tokens SET suspended_at=NULL "
+                    "WHERE name=? AND suspended_at IS NOT NULL",
+                    (name.strip(),),
+                )
+                return int(cursor.rowcount)
+
+    def resume(self, token: str | int | TokenRecord) -> bool:
+        """Снять приостановку по значению, id или записи."""
+        if isinstance(token, TokenRecord):
+            return self.resume_by_id(token.id)
+        if isinstance(token, int) and not isinstance(token, bool):
+            return self.resume_by_id(token)
+        if not isinstance(token, str) or not token.strip():
+            return False
+        with self._lock:
+            self._ensure_open()
+            with self._conn:
+                cursor = self._conn.execute(
+                    "UPDATE tokens SET suspended_at=NULL "
+                    "WHERE token_hash=? AND suspended_at IS NOT NULL",
+                    (_hash_token(token.strip()),),
+                )
+                return bool(cursor.rowcount)
 
     def list_tokens(self) -> list[TokenRecord]:
         """Все токены без секретов, новые сверху."""
