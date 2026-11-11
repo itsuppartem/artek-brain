@@ -412,3 +412,62 @@ def test_cli_repack_requires_owner_and_is_idempotent(tmp_path: Path) -> None:
     content = _run(root, "read", "docs/a.md", "--version", "2", token=owner)
     assert content.returncode == 0
     assert "значение 2" in content.stdout
+
+
+def test_cli_backup_and_maintain(tmp_path: Path) -> None:
+    root = tmp_path / "brain"
+    owner = _init(root)
+    agent = _agent(root, owner)
+    _json(
+        _run(
+            root,
+            "--json",
+            "write",
+            "docs/a.md",
+            "--content",
+            "# A\n\nтекст\n",
+            "--reason",
+            "создал",
+            token=agent,
+        )
+    )
+    output = tmp_path / "backups"
+    created = _json(
+        _run(
+            root,
+            "--json",
+            "backup",
+            "create",
+            "--output",
+            str(output),
+            "--keep",
+            "2",
+            token=owner,
+        )
+    )
+    assert Path(created["archive"]).is_file()
+    verified = _json(
+        _run(
+            root,
+            "--json",
+            "backup",
+            "verify",
+            created["archive"],
+            token=owner,
+        )
+    )
+    assert verified["ok"] is True and verified["documents"] == 1
+    maintained = _json(_run(root, "--json", "maintain", token=owner))
+    assert maintained["action"] == "maintain"
+    assert maintained["checkpoints"]
+
+    denied = _run(
+        root,
+        "--json",
+        "backup",
+        "create",
+        "--output",
+        str(output),
+        token=agent,
+    )
+    assert denied.returncode == 1

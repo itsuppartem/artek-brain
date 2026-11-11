@@ -390,6 +390,22 @@ def _parser() -> argparse.ArgumentParser:
     disk_report.add_argument("--days", type=int, default=30)
     disk_report.add_argument("--forecast-days", dest="forecast_days", type=int, default=30)
 
+    backup = add("backup", "резервные копии хранилища")
+    backup_sub = backup.add_subparsers(dest="backup_command", required=True)
+    backup_create = backup_sub.add_parser("create", help="создать архив хранилища")
+    _add_common(backup_create)
+    backup_create.add_argument(
+        "--output", required=True, help="Каталог для архивов и манифестов."
+    )
+    backup_create.add_argument(
+        "--keep", type=int, default=None, help="Хранить N последних архивов."
+    )
+    backup_verify = backup_sub.add_parser("verify", help="проверить архив")
+    _add_common(backup_verify)
+    backup_verify.add_argument("archive", help="Путь к brain-backup-*.tar.gz.")
+
+    add("maintain", "обслуживание: WAL checkpoint, gc, repack, отчёт")
+
     quality = add("quality", "качество знаний: отчёты, drift, дубли, противоречия, очередь")
     quality_sub = quality.add_subparsers(dest="quality_command", required=True)
     q_report = quality_sub.add_parser("report", help="метрики качества")
@@ -850,6 +866,14 @@ def _run(args: argparse.Namespace) -> Any:
             return service.disk_report(
                 token, days=args.days, forecast_days=args.forecast_days
             )
+        if command == "backup":
+            if args.backup_command == "create":
+                return service.backup_create(
+                    token, args.output, keep=args.keep
+                )
+            return service.backup_verify(token, args.archive)
+        if command == "maintain":
+            return service.maintain(token)
         if command == "quality":
             return _quality(service, token, args)
         if command == "task":
