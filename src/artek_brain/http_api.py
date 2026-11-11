@@ -346,6 +346,7 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
                 limit=_qint(query, "limit") or 20,
                 offset=_qint(query, "offset") or 0,
                 history=_qbool(query, "history"),
+                mode=_q1(query, "mode") or "fts",
             )
         if head in ("ls", "tree") and method == "GET":
             return service.ls(
@@ -721,7 +722,10 @@ OPENAPI: dict[str, Any] = {
         "/documents/{path}/delete": {"post": {"summary": "Удалить документ"}},
         "/documents/{path}/restore": {"post": {"summary": "Восстановить документ"}},
         "/search": {"get": {"summary": "Поиск", "parameters": [
-            {"name": "q", "in": "query", "required": True, "schema": {"type": "string"}}
+            {"name": "q", "in": "query", "required": True, "schema": {"type": "string"}},
+            {"name": "mode", "in": "query", "schema": {
+                "type": "string", "enum": ["fts", "semantic", "hybrid"]
+            }},
         ]}},
         "/ls": {"get": {"summary": "Список каталога"}},
         "/tree": {"get": {"summary": "Дерево памяти"}},

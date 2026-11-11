@@ -202,3 +202,97 @@ def test_quality_can_store_token(brain: Brain, owner: str) -> None:
     assert quality.report()["documents"] == 1
     assert quality.duplicates() == []
     assert quality.validate("docs/a.md").valid is True
+
+
+def test_table_contradiction_ignores_different_columns(brain: Brain, owner: str) -> None:
+    first = (
+        "# Ответы\n\n"
+        "| Источник | Статус | Размер ответа | Что видно |\n"
+        "| --- | --- | --- | --- |\n"
+        "| polovni, выдача | 200 | 1 271 276 Б | список выдачи |\n"
+    )
+    second = (
+        "# Выдача\n\n"
+        "| Источник | Кол-во | Комментарий |\n"
+        "| --- | --- | --- |\n"
+        "| polovni, выдача | 100 | записей за день |\n"
+    )
+    _write(brain, owner, "docs/answers.md", first)
+    _write(brain, owner, "docs/items.md", second)
+
+    assert Quality(brain).contradictions(owner) == []
+
+
+def test_table_contradiction_same_column_and_whole_number(brain: Brain, owner: str) -> None:
+    first = (
+        "# A\n\n"
+        "| Источник | Размер ответа |\n"
+        "| --- | --- |\n"
+        "| polovni, выдача | 1 271 276 Б |\n"
+    )
+    second = (
+        "# B\n\n"
+        "| Источник | Размер ответа |\n"
+        "| --- | --- |\n"
+        "| polovni, выдача | 1 271 277 Б |\n"
+    )
+    _write(brain, owner, "docs/a.md", first)
+    _write(brain, owner, "docs/b.md", second)
+
+    items = Quality(brain).contradictions(owner)
+    assert len(items) == 1
+    item = items[0]
+    assert item.kind == "table"
+    assert "polovni, выдача" in item.key
+    assert "размер ответа" in item.key
+    assert {item.value_a, item.value_b} == {"1271276", "1271277"}
+    assert {item.path_a, item.path_b} == {"docs/a.md", "docs/b.md"}
+
+
+def test_table_contradiction_requires_same_units(brain: Brain, owner: str) -> None:
+    _write(
+        brain,
+        owner,
+        "docs/a.md",
+        "# A\n\n| Источник | Размер |\n| --- | --- |\n| файл | 1 271 276 Б |\n",
+    )
+    _write(
+        brain,
+        owner,
+        "docs/b.md",
+        "# B\n\n| Источник | Размер |\n| --- | --- |\n| файл | 1 271 276 байт |\n",
+    )
+    assert Quality(brain).contradictions(owner) == []
+
+
+def test_report_details_lists_paths_to_fix(brain: Brain, owner: str) -> None:
+    brain.write(owner, "docs/nofrontmatter.md", "# Без метаданных\n", "c")
+    brain.write(
+        owner,
+        "docs/noowner.md",
+        "---\ntype: note\nstatus: draft\nreview_by: 2030-01-01\n---\n# Нет owner\n",
+        "c",
+    )
+    brain.write(
+        owner,
+        "docs/noreview.md",
+        "---\ntype: note\nstatus: draft\nowner: owner\n---\n# Нет review_by\n",
+        "c",
+    )
+    brain.write(
+        owner,
+        "docs/overdue.md",
+        "---\ntype: note\nstatus: draft\nowner: owner\nreview_by: 2000-01-01\n---\n# Старое\n",
+        "c",
+    )
+
+    plain = Quality(brain).report(owner)
+    assert "without_owner" not in plain
+
+    report = Quality(brain).report(owner, details=True)
+    assert "docs/nofrontmatter.md" in report["without_frontmatter"]
+    assert "docs/noowner.md" in report["without_owner"]
+    assert "docs/noreview.md" in report["without_review_by"]
+    assert "docs/overdue.md" in report["without_refs"]
+    assert "docs/overdue.md" in report["overdue_paths"]
+    assert "docs/noreview.md" not in report["overdue_paths"]

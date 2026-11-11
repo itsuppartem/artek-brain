@@ -81,3 +81,31 @@ def test_cli_quality_report_contradictions_queue(tmp_path: Path) -> None:
         )
     )
     assert approved["item"]["status"] == "approved"
+
+
+def test_cli_quality_links_and_report_details(tmp_path: Path) -> None:
+    root = tmp_path / "brain"
+    token = _json(_run(root, "--json", "init"))["token"]
+    assert _run(
+        root, "write", "docs/a.md", "--reason", "a", token=token,
+        stdin="---\ntype: note\nstatus: draft\nowner: owner\n---\n[нет](missing.md)\n",
+    ).returncode == 0
+    assert _run(
+        root, "write", "docs/b.md", "--reason", "b", token=token,
+        stdin="# Без метаданных\n",
+    ).returncode == 0
+
+    links = _json(_run(root, "--json", "quality", "links", token=token))
+    assert links["action"] == "links"
+    assert len(links["items"]) == 1
+    assert links["items"][0]["source"] == "docs/a.md"
+    assert links["items"][0]["target"] == "docs/missing.md"
+
+    report = _json(
+        _run(root, "--json", "quality", "report", "--details", token=token)
+    )
+    assert report["without_frontmatter"] == ["docs/b.md"]
+    assert "docs/b.md" in report["without_owner"]
+    assert "docs/b.md" in report["without_review_by"]
+    assert "docs/b.md" in report["without_refs"]
+    assert "docs/a.md" in report["without_refs"]

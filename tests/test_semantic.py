@@ -345,3 +345,83 @@ def test_cli_semantic_flag_and_mcp_mode(tmp_path: Path) -> None:
         assert error is True and "режим" in text.lower()
     finally:
         service.close()
+
+
+def test_cli_semantic_status_enable_reindex_disable(tmp_path: Path) -> None:
+    root = tmp_path / "brain"
+    root.mkdir()
+    owner = json.loads(_cli(root, "--json", "init").stdout)["token"]
+    agent = json.loads(
+        _cli(
+            root, "--json", "token", "create", "--name", "agent", "--role", "agent",
+            "--scope", "docs:write", token=owner,
+        ).stdout
+    )["token"]
+
+    status = json.loads(_cli(root, "--json", "semantic", "status", token=owner).stdout)
+    assert status["enabled"] is False
+    assert status["chunks"] == 0
+
+    denied = _cli(root, "--json", "semantic", "enable", token=agent)
+    assert denied.returncode != 0
+
+    enabled = _cli(
+        root, "--json", "semantic", "enable", "--embedder", "hash", "--dim", "64",
+        token=owner,
+    )
+    assert enabled.returncode == 0, enabled.stderr
+    data = json.loads(enabled.stdout)
+    assert data["enabled"] is True
+    assert data["embedder"] == "hash"
+    assert data["dim"] == 64
+    assert data["chunks"] == 0
+    assert data["stale"] is False
+
+    written = _cli(
+        root, "--json", "write", "docs/a.md", "--reason", "c", token=agent,
+        stdin="# A\n\ndeploy server release\n",
+    )
+    assert written.returncode == 0, written.stderr
+
+    denied_reindex = _cli(root, "--json", "semantic", "reindex", token=agent)
+    assert denied_reindex.returncode != 0
+
+    reindex = _cli(root, "--json", "semantic", "reindex", token=owner)
+    assert reindex.returncode == 0, reindex.stderr
+    assert json.loads(reindex.stdout)["chunks"] >= 1
+
+    status = json.loads(_cli(root, "--json", "semantic", "status", token=owner).stdout)
+    assert status["chunks"] >= 1
+    assert status["stale"] is False
+
+    hybrid = _cli(
+        root, "--json", "search", "deploy server", "--mode", "hybrid", token=agent
+    )
+    assert hybrid.returncode == 0, hybrid.stderr
+    assert json.loads(hybrid.stdout)["items"][0]["path"] == "docs/a.md"
+
+    disabled = _cli(root, "--json", "semantic", "disable", token=owner)
+    assert disabled.returncode == 0, disabled.stderr
+    assert json.loads(disabled.stdout)["enabled"] is False
+
+
+def test_mcp_hybrid_without_semantics_returns_fts_with_warning(tmp_path: Path) -> None:
+    service = Service(tmp_path / "brain")
+    owner = str(service.access.create_token("owner", "owner"))
+    agent = str(service.access.create_token("agent", "agent", [("docs", "write")]))
+    service.write(agent, "docs/a.md", "# A\n\ndeploy server\n", "c")
+    try:
+        app = BrainMCP(service, agent)
+        text, error = app.call("brain_search", {"query": "deploy", "mode": "hybrid"})
+        assert error is False
+        data = json.loads(text)
+        assert data["total"] == 1
+        assert "warning" in data and "semantic" in data["warning"]
+
+        text, error = app.call(
+            "brain_search", {"query": "deploy", "mode": "semantic"}
+        )
+        assert error is True
+        assert "semantic" in text.lower() or "семант" in text.lower()
+    finally:
+        service.close()

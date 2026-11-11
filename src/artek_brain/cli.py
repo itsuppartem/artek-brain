@@ -78,6 +78,26 @@ def _print_text(command: str, data: Any) -> None:
             )
             print(f"stale: {data.get('stale', 0)}")
             print(f"открытая очередь ревью: {data.get('review_queue_open', 0)}")
+            labels = (
+                ("without_frontmatter", "без frontmatter"),
+                ("without_owner", "без owner"),
+                ("without_review_by", "без review_by"),
+                ("without_refs", "без refs"),
+                ("overdue_paths", "просрочен review_by"),
+            )
+            for key, title in labels:
+                if key not in data:
+                    continue
+                paths = data.get(key) or []
+                print(f"{title}: {len(paths)}")
+                for path in paths:
+                    print(f"  - {path}")
+            return
+        if action == "links":
+            items = data.get("items", [])
+            print(f"битых ссылок: {len(items)}")
+            for item in items:
+                print(f"- {item['source']}: {item['target']}")
             return
         if action == "drift":
             items = data.get("items", [])
@@ -359,6 +379,23 @@ def _parser() -> argparse.ArgumentParser:
         help="Режим поиска: fts, semantic или hybrid.",
     )
 
+    semantic = add("semantic", "семантический поиск: состояние и настройка")
+    semantic_sub = semantic.add_subparsers(dest="semantic_command", required=True)
+    s_status = semantic_sub.add_parser("status", help="включена ли семантика и состояние индекса")
+    _add_common(s_status)
+    s_enable = semantic_sub.add_parser("enable", help="включить семантику (только owner)")
+    _add_common(s_enable)
+    s_enable.add_argument(
+        "--embedder", choices=["hash", "ollama"], default="hash", help="Тип эмбеддера."
+    )
+    s_enable.add_argument("--dim", type=int, default=None, help="Размерность (hash).")
+    s_enable.add_argument("--model", default=None, help="Модель Ollama.")
+    s_enable.add_argument("--url", default=None, help="Адрес Ollama.")
+    s_disable = semantic_sub.add_parser("disable", help="выключить семантику (только owner)")
+    _add_common(s_disable)
+    s_reindex = semantic_sub.add_parser("reindex", help="перестроить индекс (только owner)")
+    _add_common(s_reindex)
+
     links = add("links", "исходящие ссылки")
     links.add_argument("path")
     links.add_argument("--version", type=int, default=None)
@@ -395,6 +432,12 @@ def _parser() -> argparse.ArgumentParser:
     q_report = quality_sub.add_parser("report", help="метрики качества")
     _add_common(q_report)
     q_report.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
+    q_report.add_argument(
+        "--details", action="store_true", help="Показать пути документов для исправления."
+    )
+    q_links = quality_sub.add_parser("links", help="битые внутренние ссылки")
+    _add_common(q_links)
+    q_links.add_argument("--prefix", default="", help="Ограничить префиксом пути.")
     q_drift = quality_sub.add_parser("drift", help="привязки refs к файлам репозитория")
     _add_common(q_drift)
     q_drift.add_argument("--repo", default=".", help="Корень git-репозитория с кодом.")
@@ -826,6 +869,20 @@ def _run(args: argparse.Namespace) -> Any:
                 history=args.history,
                 mode=mode,
             )
+        if command == "semantic":
+            if args.semantic_command == "status":
+                return service.semantic_status(token)
+            if args.semantic_command == "enable":
+                return service.semantic_enable(
+                    token,
+                    embedder=args.embedder,
+                    dim=args.dim,
+                    model=args.model,
+                    url=args.url,
+                )
+            if args.semantic_command == "disable":
+                return service.semantic_disable(token)
+            return service.semantic_reindex(token)
         if command == "links":
             return service.links(token, args.path, version=args.version)
         if command == "backlinks":
@@ -938,7 +995,18 @@ def _quality(service: Service, token: str | None, args: argparse.Namespace) -> A
     quality = Quality(service.brain)
     action = args.quality_command
     if action == "report":
-        return {"action": "report", **quality.report(token or "", args.prefix)}
+        return {
+            "action": "report",
+            **quality.report(
+                token or "", args.prefix, details=bool(getattr(args, "details", False))
+            ),
+        }
+    if action == "links":
+        links = quality.broken_links(token or "", args.prefix)
+        return {
+            "action": "links",
+            "items": [item.as_dict() for item in links],
+        }
     if action == "drift":
         drift = Drift(service.brain, args.repo)
         items = drift.check(token or "", prefix=args.prefix)
