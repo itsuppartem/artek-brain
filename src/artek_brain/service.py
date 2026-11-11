@@ -743,6 +743,49 @@ class Service:
             self.store.disk_report(days=days, forecast_days=forecast_days)
         )
 
+    def backup_create(
+        self,
+        token: str | None,
+        output: str | Path,
+        *,
+        keep: int | None = None,
+    ) -> dict[str, Any]:
+        """Создать резервную копию хранилища; только owner."""
+        principal = self._require_owner(token, "backup_create")
+        from .backup import create_backup
+
+        result = create_backup(self.root, output, keep=keep)
+        with self.store._lock:
+            self.store._ensure_open()
+            with self.store._conn:
+                self.store._audit_ok(
+                    principal.name, "backup_create", None, result
+                )
+        return _jsonable(result)
+
+    def backup_verify(
+        self, token: str | None, archive: str | Path
+    ) -> dict[str, Any]:
+        """Проверить резервную копию; только owner."""
+        principal = self._require_owner(token, "backup_verify")
+        from .backup import verify_backup
+
+        result = verify_backup(archive)
+        with self.store._lock:
+            self.store._ensure_open()
+            with self.store._conn:
+                self.store._audit_ok(
+                    principal.name, "backup_verify", None, result
+                )
+        return _jsonable(result)
+
+    def maintain(self, token: str | None) -> dict[str, Any]:
+        """Checkpoint WAL, gc, repack и отчёт; только owner."""
+        principal = self._require_owner(token, "maintain")
+        from .maintenance import maintain
+
+        return _jsonable(maintain(self.store, actor=principal.name))
+
     def who_knows(self, token: str | None, path: str) -> dict[str, Any] | None:
         """Кто последним менял путь."""
         self.principal(token)

@@ -22,7 +22,19 @@ from .errors import DeletedError, NotFoundError, ValidationError
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 _TAG_SPLIT_RE = re.compile(r"[\s,]+")
 
+_INDEX_SCHEMA_VERSION = "2"
+
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS indexed_docs (
+    path TEXT PRIMARY KEY,
+    current_version INTEGER,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    history_max INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS current_map (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL UNIQUE
@@ -197,17 +209,72 @@ class Search:
         db_path = Path(path) if path is not None else Path(store.root) / "search.sqlite3"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
-        self._conn = sqlite3.connect(
-            str(db_path), timeout=30.0, isolation_level="DEFERRED", check_same_thread=False
-        )
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=30000")
-        with self._conn:
-            self._conn.executescript(_SCHEMA)
-        self._signature_value: tuple[int, int] | None = None
+        self._conn = self._open_connection()
+        self._signature_value: str | None = None
         if sync:
             self.sync()
+
+    @staticmethod
+    def _is_corruption(exc: BaseException) -> bool:
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in (
+                "malformed",
+                "not a database",
+                "file is not a database",
+                "database disk image is malformed",
+                "corrupt",
+            )
+        )
+
+    def _new_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(
+            str(self.db_path),
+            timeout=30.0,
+            isolation_level="DEFERRED",
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
+    def _open_connection(self) -> sqlite3.Connection:
+        try:
+            conn = self._new_connection()
+            try:
+                with conn:
+                    conn.executescript(_SCHEMA)
+            except sqlite3.DatabaseError:
+                conn.close()
+                raise
+            return conn
+        except sqlite3.DatabaseError as exc:
+            if not self._is_corruption(exc):
+                raise
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    self.db_path.with_name(self.db_path.name + suffix).unlink()
+                except FileNotFoundError:
+                    pass
+            conn = self._new_connection()
+            with conn:
+                conn.executescript(_SCHEMA)
+            return conn
+
+    def _recreate_index(self) -> None:
+        """Пересоздать файл индекса после повреждения."""
+        try:
+            self._conn.close()
+        except sqlite3.Error:
+            pass
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                self.db_path.with_name(self.db_path.name + suffix).unlink()
+            except FileNotFoundError:
+                pass
+        self._conn = self._open_connection()
 
     def __enter__(self) -> "Search":
         return self
@@ -229,20 +296,130 @@ class Search:
                 hint="Создайте новый Search(store) до конца работы.",
             )
 
-    def _signature(self) -> tuple[int, int]:
-        """Отпечаток хранилища: последний id версии и число документов."""
+    def _signature(self) -> str:
+        """Отпечаток хранилища: версии и состояние документов.
+
+        Учитывает удаление и восстановление (флаг deleted и current_version),
+        поэтому не пропускает изменения, которые не меняют MAX(id)/COUNT.
+        """
         with self.store._lock:
             self.store._ensure_open()
             row = self.store._conn.execute(
-                "SELECT (SELECT COALESCE(MAX(id), 0) FROM versions) AS v,"
-                " (SELECT COUNT(*) FROM documents) AS d"
+                "SELECT"
+                " (SELECT COUNT(*) FROM versions) AS vc,"
+                " (SELECT COALESCE(MAX(id), 0) FROM versions) AS vm,"
+                " (SELECT COALESCE(SUM(n), 0) FROM versions) AS vn,"
+                " (SELECT COUNT(*) FROM documents) AS dc,"
+                " (SELECT COALESCE(SUM(COALESCE(current_version, 0)), 0)"
+                "  FROM documents) AS dv,"
+                " (SELECT COALESCE(SUM(deleted), 0) FROM documents) AS dd,"
+                " (SELECT COALESCE(SUM(LENGTH(path)), 0) FROM documents) AS dp"
             ).fetchone()
-        return int(row["v"]), int(row["d"])
+        parts = (
+            row["vc"],
+            row["vm"],
+            row["vn"],
+            row["dc"],
+            row["dv"],
+            row["dd"],
+            row["dp"],
+        )
+        return ":".join(str(int(value)) for value in parts)
 
     def _ensure_fresh(self) -> None:
         """Догнать индекс, если Store писали в обход фасада."""
         if self._signature_value != self._signature():
             self.sync()
+
+    def _meta_locked(self) -> dict[str, str]:
+        rows = self._conn.execute("SELECT key, value FROM meta").fetchall()
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def _set_meta_locked(self, values: dict[str, Any]) -> None:
+        for key, value in values.items():
+            self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(value)),
+            )
+
+    def _delete_meta_locked(self, key: str) -> None:
+        self._conn.execute("DELETE FROM meta WHERE key=?", (key,))
+
+    def _indexed_docs_locked(self) -> dict[str, tuple[int, bool, int]]:
+        rows = self._conn.execute(
+            "SELECT path, current_version, deleted, history_max FROM indexed_docs"
+        ).fetchall()
+        return {
+            str(row["path"]): (
+                int(row["current_version"] or 0),
+                bool(row["deleted"]),
+                int(row["history_max"] or 0),
+            )
+            for row in rows
+        }
+
+    def _store_docs(self) -> dict[str, tuple[int, bool]]:
+        with self.store._lock:
+            self.store._ensure_open()
+            rows = self.store._conn.execute(
+                "SELECT path, current_version, deleted FROM documents ORDER BY path"
+            ).fetchall()
+        return {
+            str(row["path"]): (int(row["current_version"] or 0), bool(row["deleted"]))
+            for row in rows
+        }
+
+    def _path_snapshot(
+        self, path: str, from_history: int
+    ) -> tuple[
+        bool,
+        bool,
+        Any | None,
+        str | None,
+        list[tuple[Any, str]],
+        int,
+    ]:
+        """Снимок документа и его новых версий истории за один захват блокировки."""
+        with self.store._lock:
+            self.store._ensure_open()
+            doc = self.store._get_doc_locked(path)
+            if doc is None:
+                return False, False, None, None, [], 0
+            current = int(doc["current_version"])
+            current_info = self.store._version_info(
+                self.store._version_row_locked(path, current)
+            )
+            current_text = self.store._read_blob(current_info.sha256)
+            rows = self.store._conn.execute(
+                "SELECT n FROM versions WHERE path=? AND n>? ORDER BY n",
+                (path, from_history),
+            ).fetchall()
+            history: list[tuple[Any, str]] = []
+            for row in rows:
+                info = self.store._version_info(
+                    self.store._version_row_locked(path, int(row["n"]))
+                )
+                history.append((info, self.store._read_blob(info.sha256)))
+            max_row = self.store._conn.execute(
+                "SELECT COALESCE(MAX(n), 0) AS m FROM versions WHERE path=?", (path,)
+            ).fetchone()
+            max_n = int(max_row["m"])
+            return True, bool(doc["deleted"]), current_info, current_text, history, max_n
+
+    def _upsert_indexed_locked(
+        self, path: str, current_version: int, deleted: bool, history_max: int
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO indexed_docs (path, current_version, deleted, history_max)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(path) DO UPDATE SET current_version=excluded.current_version,"
+            " deleted=excluded.deleted, history_max=excluded.history_max",
+            (path, int(current_version), int(bool(deleted)), int(history_max)),
+        )
+
+    def _delete_indexed_locked(self, path: str) -> None:
+        self._conn.execute("DELETE FROM indexed_docs WHERE path=?", (path,))
 
     # ------------------------------------------------------------------
     # Наполнение индекса
@@ -373,21 +550,42 @@ class Search:
             ),
         )
 
+    def _remove_history_locked(self, path: str) -> None:
+        rows = self._conn.execute(
+            "SELECT id FROM history_map WHERE path=?", (path,)
+        ).fetchall()
+        for row in rows:
+            self._conn.execute(
+                "DELETE FROM history_fts WHERE rowid=?", (row["id"],)
+            )
+        self._conn.execute("DELETE FROM history_map WHERE path=?", (path,))
+
     def update(self, path: str) -> None:
         """Обновить индексы одного документа после изменения."""
-        exists, deleted, info, text = self._doc_state(path)
+        with self._lock:
+            self._ensure_open()
+            old = self._indexed_docs_locked().get(path)
+            from_history = old[2] if old is not None else 0
+        snapshot = self._path_snapshot(path, from_history)
+        exists, deleted, info, text, history, max_n = snapshot
         with self._lock:
             self._ensure_open()
             with self._conn:
                 if not exists:
                     self._remove_current_locked(path)
-                elif deleted:
-                    self._remove_current_locked(path)
-                    self._write_history_locked(path, info, text)
+                    self._delete_indexed_locked(path)
+                    self._remove_history_locked(path)
                 else:
-                    self._write_current_locked(path, info, text)
-                    self._write_history_locked(path, info, text)
-        self._signature_value = self._signature()
+                    if deleted:
+                        self._remove_current_locked(path)
+                    else:
+                        self._write_current_locked(path, info, text)
+                    for history_info, history_text in history:
+                        self._write_history_locked(path, history_info, history_text)
+                    self._upsert_indexed_locked(path, int(info.n), deleted, max_n)
+            # Отпечаток не сохраняем: другой процесс мог записать документ,
+            # которого ещё нет в индексе. Следующий sync догонит его.
+            self._signature_value = None
 
     def remove(self, path: str) -> None:
         """Убрать документ из текущего индекса (история остаётся)."""
@@ -397,41 +595,134 @@ class Search:
                 self._remove_current_locked(path)
         self._signature_value = self._signature()
 
-    def sync(self) -> None:
-        """Перестроить оба индекса из хранилища целиком."""
-        with self.store._lock:
-            self.store._ensure_open()
-            docs = self.store._conn.execute(
-                "SELECT path, current_version, deleted FROM documents ORDER BY path"
-            ).fetchall()
-            versions = self.store._conn.execute(
-                "SELECT path, n FROM versions ORDER BY path, n"
-            ).fetchall()
-            snapshot: list[tuple[str, int, bool]] = []
-            for row in docs:
-                snapshot.append((row["path"], int(row["current_version"]), bool(row["deleted"])))
-            version_pairs = [(row["path"], int(row["n"])) for row in versions]
+    def _incremental_sync_locked(self, fingerprint: str) -> None:
+        docs = self._store_docs()
+        indexed = self._indexed_docs_locked()
+        changed: list[str] = []
+        for path, state in docs.items():
+            old = indexed.get(path)
+            if old is None or (old[0], old[1]) != state:
+                changed.append(path)
+        for path in indexed:
+            if path not in docs:
+                changed.append(path)
+        changed.sort()
+        snapshots = []
+        for path in changed:
+            old = indexed.get(path)
+            from_history = old[2] if old is not None else 0
+            snapshots.append((path, self._path_snapshot(path, from_history)))
         with self._lock:
             self._ensure_open()
+            with self._conn:
+                for path, snapshot in snapshots:
+                    exists, deleted, info, text, history, max_n = snapshot
+                    if not exists:
+                        self._remove_current_locked(path)
+                        self._delete_indexed_locked(path)
+                        self._remove_history_locked(path)
+                        continue
+                    if deleted:
+                        self._remove_current_locked(path)
+                        for history_info, history_text in history:
+                            self._write_history_locked(
+                                path, history_info, history_text
+                            )
+                        self._upsert_indexed_locked(
+                            path, int(info.n), True, max_n
+                        )
+                    else:
+                        self._write_current_locked(path, info, text)
+                        for history_info, history_text in history:
+                            self._write_history_locked(
+                                path, history_info, history_text
+                            )
+                        self._upsert_indexed_locked(
+                            path, int(info.n), False, max_n
+                        )
+                self._set_meta_locked({"schema": _INDEX_SCHEMA_VERSION})
+                if self._signature() == fingerprint:
+                    self._set_meta_locked({"fingerprint": fingerprint})
+                    stable = True
+                else:
+                    self._delete_meta_locked("fingerprint")
+                    stable = False
+        self._signature_value = fingerprint if stable else None
+
+    def sync(self) -> None:
+        """Догнать индекс по отпечатку; полная перестройка — только при сбое."""
+        with self._lock:
+            self._ensure_open()
+            try:
+                meta = self._meta_locked()
+            except sqlite3.DatabaseError as exc:
+                if self._is_corruption(exc):
+                    self._recreate_index()
+                    self.rebuild()
+                    return
+                raise
+        if meta.get("schema") != _INDEX_SCHEMA_VERSION:
+            self.rebuild()
+            return
+        fingerprint = self._signature()
+        if meta.get("fingerprint") == fingerprint:
+            self._signature_value = fingerprint
+            return
+        self._incremental_sync_locked(fingerprint)
+
+    def rebuild(self) -> None:
+        """Полностью перестроить оба индекса из хранилища."""
+        with self._lock:
+            self._ensure_open()
+            fingerprint = self._signature()
+            with self.store._lock:
+                self.store._ensure_open()
+                docs = self.store._conn.execute(
+                    "SELECT path, current_version, deleted FROM documents ORDER BY path"
+                ).fetchall()
+                versions = self.store._conn.execute(
+                    "SELECT path, n FROM versions ORDER BY path, n"
+                ).fetchall()
+                snapshot: list[tuple[str, int, bool]] = [
+                    (
+                        str(row["path"]),
+                        int(row["current_version"]),
+                        bool(row["deleted"]),
+                    )
+                    for row in docs
+                ]
+                version_pairs = [(str(row["path"]), int(row["n"])) for row in versions]
+            history_max: dict[str, int] = {}
+            for path, version in version_pairs:
+                history_max[path] = max(history_max.get(path, 0), version)
             with self._conn:
                 self._conn.execute("DELETE FROM current_fts")
                 self._conn.execute("DELETE FROM current_map")
                 self._conn.execute("DELETE FROM history_fts")
                 self._conn.execute("DELETE FROM history_map")
+                self._conn.execute("DELETE FROM indexed_docs")
                 for path, current_version, deleted in snapshot:
-                    if deleted:
-                        continue
-                    info, text = self._doc_version(path, current_version)
-                    self._write_current_locked(path, info, text)
+                    if not deleted:
+                        info, text = self._doc_version(path, current_version)
+                        self._write_current_locked(path, info, text)
                 for path, version in version_pairs:
-                    try:
-                        info, text = self._doc_version(path, version)
-                    except (NotFoundError, DeletedError):
-                        continue
+                    info, text = self._doc_version(path, version)
                     self._write_history_locked(path, info, text)
-        self._signature_value = self._signature()
-
-    rebuild = sync
+                for path, current_version, deleted in snapshot:
+                    self._upsert_indexed_locked(
+                        path,
+                        current_version,
+                        deleted,
+                        history_max.get(path, 0),
+                    )
+                self._set_meta_locked({"schema": _INDEX_SCHEMA_VERSION})
+                if self._signature() == fingerprint:
+                    self._set_meta_locked({"fingerprint": fingerprint})
+                    stable = True
+                else:
+                    self._delete_meta_locked("fingerprint")
+                    stable = False
+        self._signature_value = fingerprint if stable else None
 
     # ------------------------------------------------------------------
     # Поиск
