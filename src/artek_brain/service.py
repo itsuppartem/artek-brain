@@ -604,6 +604,13 @@ class Service:
                 "Семантический и гибридный поиск доступны только по текущим версиям.",
                 hint="Уберите history=true или выберите mode=fts.",
             )
+        warning: str | None = None
+        if mode == "hybrid" and self.brain.semantic is None:
+            mode = "fts"
+            warning = (
+                "Семантика выключена, поэтому hybrid-поиск выполнен как fts. "
+                "Включите её: brain semantic enable --embedder hash."
+            )
         page = (
             self.brain.search_history
             if history
@@ -622,7 +629,160 @@ class Service:
             offset=_as_int(offset, "offset") or 0,
             **({} if history else {"mode": mode}),
         )
-        return _jsonable(page)
+        data = _jsonable(page)
+        if warning:
+            data["warning"] = warning
+        return data
+
+    # ------------------------------------------------------------------
+    # Семантика: настройка, состояние, переиндексация
+    # ------------------------------------------------------------------
+    def _require_owner(self, token: str | None, action: str) -> Principal:
+        """Проверить, что токен принадлежит owner."""
+        principal = self.brain.access.verify(token or "")
+        if principal.role != "owner":
+            raise PermissionDenied(
+                action,
+                None,
+                "owner",
+                actor=principal.name,
+                reason=f"действие «{action}» доступно только owner",
+            )
+        return principal
+
+    def _reload_semantic(self) -> None:
+        """Пересоздать семантический индекс после смены настроек."""
+        from .semantic import SemanticIndex
+
+        if self.brain.semantic is not None:
+            self.brain.semantic.close()
+        index = SemanticIndex.from_store(self.store)
+        self.brain.semantic = index
+        if index is not None:
+            index.set_candidate_provider(self.brain._semantic_candidates)
+
+    def semantic_status(self, token: str | None) -> dict[str, Any]:
+        """Состояние семантики: включена ли, модель, размерность, чанки, stale."""
+        from .semantic import INDEX_FILE, SemanticIndex, load_settings
+
+        self.brain.access.verify(token or "")
+        settings = load_settings(self.store)
+        status: dict[str, Any] = {
+            "enabled": bool(settings.enabled),
+            "embedder": settings.embedder,
+            "model": settings.model,
+            "dim": settings.dim,
+            "url": settings.url,
+            "chunks": 0,
+            "stale": False,
+            "stale_reason": None,
+        }
+        if self.brain.semantic is not None:
+            stats = self.brain.semantic.stats()
+            status.update(
+                {
+                    "enabled": True,
+                    "chunks": stats.get("chunks", 0),
+                    "stale": bool(stats.get("stale")),
+                    "stale_reason": stats.get("stale_reason"),
+                }
+            )
+        elif (Path(self.store.root) / INDEX_FILE).exists():
+            index = SemanticIndex(self.store)
+            try:
+                status["chunks"] = index.chunk_count()
+            finally:
+                index.close()
+        return _jsonable(status)
+
+    def semantic_enable(
+        self,
+        token: str | None,
+        *,
+        embedder: str = "hash",
+        dim: int | None = None,
+        model: str | None = None,
+        url: str | None = None,
+    ) -> dict[str, Any]:
+        """Включить семантику и сохранить settings.json (только owner)."""
+        from .embeddings import DEFAULT_HASH_DIM, DEFAULT_OLLAMA_URL
+        from .semantic import configure_semantic, load_settings
+
+        principal = self._require_owner(token, "semantic_enable")
+        kind = str(embedder or "").strip().lower()
+        if kind not in ("hash", "ollama"):
+            raise ValidationError(
+                f"Неизвестный эмбеддер «{embedder}».",
+                hint="Допустимо: hash или ollama.",
+            )
+        if kind == "ollama" and not (model or "").strip():
+            raise ValidationError(
+                "Для Ollama нужна модель эмбеддингов.",
+                hint="Передайте --model, например nomic-embed-text.",
+            )
+        if dim is None:
+            dim = DEFAULT_HASH_DIM
+        if not isinstance(dim, int) or isinstance(dim, bool) or dim < 8:
+            raise ValidationError(
+                "dim должен быть целым числом не меньше 8.",
+                hint="Например, --dim 256.",
+            )
+        configure_semantic(
+            self.store,
+            enabled=True,
+            embedder=kind,
+            model=(model or "").strip() or None,
+            url=(url or "").strip() or DEFAULT_OLLAMA_URL,
+            dim=dim,
+        )
+        self._reload_semantic()
+        with self.store._lock:
+            self.store._ensure_open()
+            with self.store._conn:
+                self.store._audit_ok(
+                    principal.name,
+                    "semantic_enable",
+                    None,
+                    {"embedder": kind, "dim": dim},
+                )
+        return self.semantic_status(token)
+
+    def semantic_disable(self, token: str | None) -> dict[str, Any]:
+        """Выключить семантику, сохранив остальные настройки (только owner)."""
+        from .semantic import configure_semantic, load_settings
+
+        principal = self._require_owner(token, "semantic_disable")
+        settings = load_settings(self.store)
+        configure_semantic(
+            self.store,
+            enabled=False,
+            embedder=settings.embedder,
+            model=settings.model,
+            url=settings.url,
+            dim=settings.dim,
+            timeout=settings.timeout,
+        )
+        self._reload_semantic()
+        with self.store._lock:
+            self.store._ensure_open()
+            with self.store._conn:
+                self.store._audit_ok(principal.name, "semantic_disable", None, {})
+        return self.semantic_status(token)
+
+    def semantic_reindex(self, token: str | None) -> dict[str, Any]:
+        """Перестроить семантический индекс (только owner, с аудитом)."""
+        principal = self._require_owner(token, "semantic_reindex")
+        result = self.brain.reindex_semantic(token or "")
+        with self.store._lock:
+            self.store._ensure_open()
+            with self.store._conn:
+                self.store._audit_ok(
+                    principal.name,
+                    "semantic_reindex",
+                    None,
+                    {"chunks": result.get("chunks", 0)},
+                )
+        return _jsonable(result)
 
     def ls(
         self, token: str | None, prefix: str = "", *, tree: bool = False,

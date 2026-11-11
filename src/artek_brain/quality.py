@@ -25,8 +25,9 @@ from .knowledge import (
     word_shingles,
 )
 
-_NUMBER_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+_NUMBER_RE = re.compile(r"-?\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?|-?\d+(?:[.,]\d+)?")
 _TABLE_RE = re.compile(r"^\s*\|(.+)\|\s*$")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
 _KEY_VALUE_RE = re.compile(
     r"^\s*(?:[-*+]\s+)?([A-Za-zА-Яа-яЁё_][\w .-]{0,60}?)\s*[:=]\s*(.+?)\s*$"
 )
@@ -131,33 +132,126 @@ def _find_line(text: str, key: str, value: str) -> int | None:
     return None
 
 
-def _numbers_in(value: str) -> list[str]:
-    result: list[str] = []
-    for match in _NUMBER_RE.finditer(value):
-        result.append(match.group(0).replace(",", "."))
+def _normalize_label(value: str) -> str:
+    """Нормализовать ключ строки или заголовок колонки для сравнения."""
+    return re.sub(r"\s+", " ", value.strip().lower()).strip()
+
+
+def _number_parts(value: str) -> tuple[str, str] | None:
+    """Первое число (целиком, с пробелами-разделителями) и его единица."""
+    match = _NUMBER_RE.search(value)
+    if match is None:
+        return None
+    raw = match.group(0)
+    compact = re.sub(r"[ \u00a0\u202f]", "", raw)
+    canonical = normalize_value(compact)
+    tail = value[match.end() :].strip()
+    unit = ""
+    if tail:
+        unit = re.sub(r"[^0-9a-zа-яё%]+", "", tail.split()[0].lower())
+    return canonical, unit
+
+
+def _display_number(canonical: str) -> str:
+    """Показать число без внутреннего префикса normalize_value."""
+    return canonical[4:] if canonical.startswith("num:") else canonical
+
+
+@dataclass(frozen=True)
+class _TableValue:
+    """Значение из ячейки таблицы: строка, колонка, число и единица."""
+
+    key: str
+    column: str
+    number: str
+    unit: str
+    line: int
+    raw: str
+
+
+def _table_block(block: list[tuple[int, list[str]]]) -> list[_TableValue]:
+    """Разобрать блок строк одной таблицы с учётом заголовка колонок."""
+    if not block:
+        return []
+    header: list[str] | None = None
+    rows = block
+    if len(block) >= 2 and block[1][1] and all(
+        _TABLE_SEPARATOR_CELL_RE.match(cell.strip()) for cell in block[1][1]
+    ):
+        header = [cell.strip() for cell in block[0][1]]
+        rows = block[2:]
+    result: list[_TableValue] = []
+    for line, cells in rows:
+        if not cells or not any(cell.strip() for cell in cells):
+            continue
+        row_key = cells[0].strip()
+        if not row_key or set(row_key) <= {"-", ":", " "}:
+            continue
+        if header is None:
+            candidates = [(1, "")] if len(cells) > 1 else []
+        else:
+            candidates = [
+                (index, header[index].strip())
+                for index in range(1, min(len(cells), len(header)))
+            ]
+        for index, column in candidates:
+            if index >= len(cells):
+                continue
+            cell = cells[index].strip()
+            parsed = _number_parts(cell)
+            if parsed is None:
+                continue
+            result.append(
+                _TableValue(
+                    key=row_key,
+                    column=_normalize_label(column),
+                    number=parsed[0],
+                    unit=parsed[1],
+                    line=line,
+                    raw=cell,
+                )
+            )
     return result
 
 
-def _table_pairs(doc: Document) -> list[tuple[str, str, int]]:
-    """Пары ключ/значение из markdown-таблиц и строк key: value."""
-    pairs: list[tuple[str, str, int]] = []
+def _table_values(doc: Document) -> list[_TableValue]:
+    """Значения из markdown-таблиц и строк key: value документа."""
+    values: list[_TableValue] = []
     lines = doc.text.splitlines()
-    for offset, line in enumerate(lines[doc.body_start :]):
-        number = doc.body_start + offset + 1
-        table = _TABLE_RE.match(line)
+    block: list[tuple[int, list[str]]] = []
+    index = doc.body_start
+    while index < len(lines):
+        number = index + 1
+        table = _TABLE_RE.match(lines[index])
         if table:
             cells = [cell.strip() for cell in table.group(1).split("|")]
-            if len(cells) >= 2 and not set(cells[0]) <= {"-", ":", " "}:
-                key, value = cells[0], cells[1]
-                if key and _numbers_in(value):
-                    pairs.append((key, value, number))
+            if cells and cells[-1] == "" and len(cells) > 1:
+                cells = cells[:-1]
+            block.append((number, cells))
+            index += 1
             continue
-        match = _KEY_VALUE_RE.match(line)
+        if block:
+            values.extend(_table_block(block))
+            block = []
+        match = _KEY_VALUE_RE.match(lines[index])
         if match:
             key, value = match.group(1).strip(), match.group(2).strip()
-            if len(key) >= 2 and _numbers_in(value):
-                pairs.append((key, value, number))
-    return pairs
+            parsed = _number_parts(value)
+            if len(key) >= 2 and parsed is not None:
+                values.append(
+                    _TableValue(
+                        key=key,
+                        column="",
+                        number=parsed[0],
+                        unit=parsed[1],
+                        line=number,
+                        raw=value,
+                    )
+                )
+        index += 1
+    if block:
+        values.extend(_table_block(block))
+    return values
 
 
 class Quality:
@@ -288,33 +382,37 @@ class Quality:
         return result
 
     def _table_contradictions(self, docs: list[Document]) -> list[Contradiction]:
-        groups: dict[str, list[tuple[Document, str, int]]] = {}
+        """Противоречия только по одной строке, колонке и единице измерения."""
+        groups: dict[tuple[str, str], list[tuple[Document, _TableValue]]] = {}
         for doc in docs:
-            for key, value, line in _table_pairs(doc):
-                numbers = _numbers_in(value)
-                if not numbers:
-                    continue
-                groups.setdefault(key.strip().lower(), []).append((doc, numbers[0], line))
+            for item in _table_values(doc):
+                key = (_normalize_label(item.key), item.column)
+                groups.setdefault(key, []).append((doc, item))
         result: list[Contradiction] = []
-        for key, entries in groups.items():
-            if len({doc.path for doc, _, _ in entries}) < 2:
+        for (_row_key, column), entries in groups.items():
+            if len({doc.path for doc, _ in entries}) < 2:
                 continue
-            for index, (left, left_value, left_line) in enumerate(entries):
-                for right, right_value, right_line in entries[index + 1 :]:
+            for index, (left, left_value) in enumerate(entries):
+                for right, right_value in entries[index + 1 :]:
                     if left.path == right.path:
                         continue
-                    if normalize_value(left_value) == normalize_value(right_value):
+                    if left_value.unit != right_value.unit:
                         continue
+                    if left_value.number == right_value.number:
+                        continue
+                    shown_key = (
+                        f"{left_value.key} / {column}" if column else left_value.key
+                    )
                     result.append(
                         Contradiction(
                             kind="table",
-                            key=key,
-                            value_a=left_value,
-                            value_b=right_value,
+                            key=shown_key,
+                            value_a=_display_number(left_value.number),
+                            value_b=_display_number(right_value.number),
                             path_a=left.path,
                             path_b=right.path,
-                            line_a=left_line,
-                            line_b=right_line,
+                            line_a=left_value.line,
+                            line_b=right_value.line,
                         )
                     )
         return result
@@ -487,25 +585,35 @@ class Quality:
     # ------------------------------------------------------------------
     # Метрики
     # ------------------------------------------------------------------
-    def report(self, token: str | None = None, prefix: str = "") -> dict[str, Any]:
-        """Свежесть, покрытие refs и число stale-документов."""
+    def report(
+        self,
+        token: str | None = None,
+        prefix: str = "",
+        *,
+        details: bool = False,
+    ) -> dict[str, Any]:
+        """Свежесть, покрытие refs и число stale-документов.
+
+        При details=True добавляет списки путей, которые нужно исправить.
+        """
         from .review_queue import ReviewQueue
 
         docs = iter_documents(self.brain, self._token(token), prefix)
         total = len(docs)
         with_refs = sum(1 for doc in docs if as_list(doc.data.get("refs")))
         with_review_by = sum(1 for doc in docs if doc.data.get("review_by"))
-        overdue = sum(
-            1
+        overdue_paths = sorted(
+            doc.path
             for doc in docs
             if (moment := parse_date(doc.data.get("review_by"))) is not None
             and moment < now_utc()
         )
+        overdue = len(overdue_paths)
         stale_paths = sorted(doc.path for doc in docs if doc.status == "stale")
         queue_open = ReviewQueue(
             self.brain.store, getattr(self.brain, "access", None)
         ).count_open()
-        return {
+        report: dict[str, Any] = {
             "documents": total,
             "with_refs": with_refs,
             "coverage": (with_refs / total) if total else 0.0,
@@ -518,3 +626,24 @@ class Quality:
             "stale_paths": stale_paths,
             "review_queue_open": queue_open,
         }
+        if details:
+            report.update(
+                {
+                    "without_frontmatter": sorted(
+                        doc.path for doc in docs if not doc.data
+                    ),
+                    "without_owner": sorted(
+                        doc.path for doc in docs if not doc.data.get("owner")
+                    ),
+                    "without_review_by": sorted(
+                        doc.path for doc in docs if not doc.data.get("review_by")
+                    ),
+                    "without_refs": sorted(
+                        doc.path
+                        for doc in docs
+                        if not as_list(doc.data.get("refs"))
+                    ),
+                    "overdue_paths": overdue_paths,
+                }
+            )
+        return report
