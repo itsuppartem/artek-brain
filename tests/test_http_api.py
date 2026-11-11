@@ -220,3 +220,33 @@ def test_http_tasks_inbox_and_brief(tmp_path: Path) -> None:
     finally:
         _stop(server)
         service.close()
+
+
+def test_http_search_mode_hybrid_falls_back_to_fts(tmp_path: Path) -> None:
+    service = Service(tmp_path / "brain")
+    agent = str(service.access.create_token("agent", "agent", [("docs", "write")]))
+    server, client = _start(service)
+    try:
+        status, _ = client.call(
+            "POST",
+            "/documents/docs/a.md",
+            {"content": "# A\n\nдеплой сервер\n", "reason": "создал"},
+            token=agent,
+        )
+        assert status == 200
+
+        status, hybrid = client.call(
+            "GET", "/search?q=деплой&mode=hybrid", token=agent
+        )
+        assert status == 200
+        assert hybrid["total"] == 1
+        assert "warning" in hybrid and "semantic" in hybrid["warning"]
+
+        status, semantic = client.call(
+            "GET", "/search?q=деплой&mode=semantic", token=agent
+        )
+        assert status == 400
+        assert "settings.json" in semantic["error"]["hint"]
+    finally:
+        _stop(server)
+        service.close()
