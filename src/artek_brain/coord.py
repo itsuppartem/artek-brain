@@ -183,11 +183,36 @@ class Coordination:
             if old in existing and new not in existing:
                 conn.execute(f"ALTER TABLE {old} RENAME TO {new}")
             elif old in existing:
+                # Старый процесс на прежнем коде мог заново создать таблицу
+                # и писать в неё: переносим строки, потом удаляем.
+                self._merge_legacy(old, new)
                 conn.execute(f"DROP TABLE {old}")
         for name in _LEGACY_DROPS:
             if name in existing:
                 conn.execute(f"DROP TABLE {name}")
         conn.execute("DROP INDEX IF EXISTS idx_task_messages_recipient")
+
+    def _merge_legacy(self, old: str, new: str) -> None:
+        conn = self._store._conn
+        if new == "messages":
+            conn.execute(
+                """
+                INSERT INTO messages (sender, recipient, subject, body, ts, read, read_at)
+                SELECT sender, recipient, subject, body, ts, read, read_at
+                FROM task_messages
+                """
+            )
+        elif new == "agents":
+            conn.execute(
+                """
+                INSERT INTO agents (name, last_seen, activity)
+                SELECT name, last_seen, activity FROM task_agents WHERE true
+                ON CONFLICT(name) DO UPDATE SET
+                    last_seen=MAX(agents.last_seen, excluded.last_seen),
+                    activity=CASE WHEN excluded.last_seen > agents.last_seen
+                                  THEN excluded.activity ELSE agents.activity END
+                """
+            )
 
     # ------------------------------------------------------------------
     # Служебное

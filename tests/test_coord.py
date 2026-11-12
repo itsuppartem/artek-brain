@@ -54,6 +54,23 @@ def test_legacy_task_tables_are_migrated(tmp_path: Path) -> None:
     store.close()
 
 
+def test_old_process_rows_are_merged(tmp_path: Path) -> None:
+    store = Store(tmp_path / "brain")
+    coord = Coordination(store)
+    coord.send("agent-1", "новое", "текст", sender="owner")
+    # Процесс на старом коде заново создал таблицы и записал в них.
+    with store._conn:
+        store._conn.executescript(_LEGACY)
+
+    Coordination(store)
+
+    subjects = sorted(item.subject for item in coord.inbox("agent-1"))
+    assert subjects == ["новое", "привет"]
+    assert [item.name for item in coord.agents_online(ttl_seconds=10**9)] == ["agent-1"]
+    assert "task_messages" not in _tables(store)
+    store.close()
+
+
 def test_brief_points_to_notes(tmp_path: Path) -> None:
     store = Store(tmp_path / "brain")
     coord = Coordination(store)
