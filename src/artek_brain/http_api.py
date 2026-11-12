@@ -385,8 +385,10 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
             return service.who_knows(token, _q1(query, "path", ""))
         if head == "tokens":
             return self._tokens(method, list(segments[1:]), query, body, token)
-        if head in ("tasks", "task"):
-            return self._tasks(method, list(segments[1:]), query, body, token)
+        if head == "agents" and method == "GET":
+            return service.coord_action(
+                token, "agents", ttl_seconds=_qint(query, "ttl_seconds") or 300
+            )
         if head == "inbox":
             return self._inbox(method, list(segments[1:]), query, body, token)
         if head == "brief" and method == "GET":
@@ -586,42 +588,6 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
             return service.token_revoke(token, token_id=int(rest[0]))
         raise HttpError(404, "Токены: GET/POST /tokens, DELETE /tokens/<id>.")
 
-    def _tasks(
-        self,
-        method: str,
-        rest: list[str],
-        query: dict[str, list[str]],
-        body: dict[str, Any],
-        token: str,
-    ) -> Any:
-        service = self.app.service
-        if method == "GET":
-            if rest:
-                return service.task(token, "show", task_id=rest[0])
-            return service.task(
-                token,
-                "list",
-                status=_q1(query, "status"),
-                assignee=_q1(query, "assignee"),
-                area=_q1(query, "area"),
-                priority=_qint(query, "priority"),
-                limit=_qint(query, "limit"),
-                offset=_qint(query, "offset") or 0,
-            )
-        if method == "POST":
-            if rest and len(rest) >= 2:
-                action = rest[1]
-                return service.task(token, action, task_id=rest[0], **body)
-            if rest:
-                return service.task(token, "show", task_id=rest[0])
-            action = _body_value(body, "action")
-            if action:
-                params = dict(body)
-                params.pop("action", None)
-                return service.task(token, action, **params)
-            return service.task(token, "create", **body)
-        raise HttpError(404, "Задачи: GET/POST /tasks, GET/POST /tasks/<id>/<action>.")
-
     def _inbox(
         self,
         method: str,
@@ -686,7 +652,7 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
             "read", "write", "delete", "restore", "history", "diff", "blame",
             "rollback_version", "rollback_author", "rollback_batch", "export",
             "search", "ls", "toc", "links", "backlinks", "broken_links",
-            "changes", "readme", "audit", "stats", "who_knows", "task", "inbox",
+            "changes", "readme", "audit", "stats", "who_knows", "coord_action", "inbox",
             "brief", "token_create", "token_list", "token_revoke",
             "sandbox_run", "sandbox_status", "sandbox_cancel",
         }
@@ -745,11 +711,7 @@ OPENAPI: dict[str, Any] = {
             "post": {"summary": "Создать токен"},
         },
         "/tokens/{id}": {"delete": {"summary": "Отозвать токен по id"}},
-        "/tasks": {
-            "get": {"summary": "Список задач"},
-            "post": {"summary": "Создать задачу"},
-        },
-        "/tasks/{id}/{action}": {"post": {"summary": "Действие с задачей"}},
+        "/agents": {"get": {"summary": "Кто из агентов сейчас работает"}},
         "/inbox": {
             "get": {"summary": "Входящие"},
             "post": {"summary": "Отправить письмо"},

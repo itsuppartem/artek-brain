@@ -223,96 +223,24 @@ def test_cli_token_from_env_and_permission_denied(tmp_path: Path) -> None:
     assert "токен" in after.stderr
 
 
-def test_cli_tasks_review_inbox_and_brief(tmp_path: Path) -> None:
+def test_cli_coord_inbox_and_brief(tmp_path: Path) -> None:
     root = tmp_path / "brain"
     owner = _init(root)
     agent = _agent(root, owner)
 
-    task = _json(
-        _run(
-            root,
-            "--json",
-            "task",
-            "create",
-            "--title",
-            "Починить API",
-            "--body",
-            "Описание",
-            "--area",
-            "docs",
-            token=agent,
-        )
-    )
-    task_id = task["id"]
-    assert task_id.startswith("DOCS-")
+    task_cmd = _run(root, "task", "list", token=agent)
+    assert task_cmd.returncode != 0
 
-    listed = _run(root, "task", "list", token=agent)
-    assert listed.returncode == 0 and task_id in listed.stdout
-
-    claimed = _json(
-        _run(
-            root,
-            "--json",
-            "task",
-            "claim",
-            task_id,
-            "--revision",
-            "1",
-            token=agent,
-        )
+    present = _json(
+        _run(root, "--json", "coord", "presence", "--activity", "пишу тесты", token=agent)
     )
-    claim_token = claimed["claim_token"]
-    assert claimed["status"] == "claimed"
+    assert present["name"] == "agent-1" and present["activity"] == "пишу тесты"
+    online = _json(_run(root, "--json", "coord", "agents", token=owner))
+    assert [item["name"] for item in online] == ["agent-1"]
 
-    started = _json(
-        _run(
-            root,
-            "--json",
-            "task",
-            "start",
-            task_id,
-            "--revision",
-            "2",
-            "--claim-token",
-            claim_token,
-            token=agent,
-        )
-    )
-    assert started["status"] == "in_progress"
-
-    submitted = _json(
-        _run(
-            root,
-            "--json",
-            "task",
-            "submit",
-            task_id,
-            "--revision",
-            "3",
-            "--claim-token",
-            claim_token,
-            "--evidence",
-            "pytest -q: 100 passed",
-            token=agent,
-        )
-    )
-    assert submitted["status"] == "review"
-
-    accepted = _json(
-        _run(
-            root,
-            "--json",
-            "task",
-            "accept",
-            task_id,
-            "--revision",
-            "4",
-            "--note",
-            "ок",
-            token=owner,
-        )
-    )
-    assert accepted["status"] == "done"
+    _run(root, "write", "docs/a.md", "--content", "# A\n", "--reason", "старт", token=agent)
+    who = _json(_run(root, "--json", "coord", "who-knows", "--path", "docs", token=owner))
+    assert who["author"] == "agent-1"
 
     sent = _json(
         _run(
@@ -325,7 +253,7 @@ def test_cli_tasks_review_inbox_and_brief(tmp_path: Path) -> None:
             "--subject",
             "Готово",
             "--body",
-            "Смотри задачу",
+            "Смотри заметку",
             token=owner,
         )
     )
@@ -350,6 +278,8 @@ def test_cli_tasks_review_inbox_and_brief(tmp_path: Path) -> None:
     brief = _run(root, "brief", token=agent)
     assert brief.returncode == 0
     assert "Бриф для agent-1" in brief.stdout
+    assert "доски задач нет" in brief.stdout
+    assert "Сейчас работают: 1" in brief.stdout
 
 
 def test_cli_repack_requires_owner_and_is_idempotent(tmp_path: Path) -> None:

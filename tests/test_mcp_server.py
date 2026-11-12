@@ -26,13 +26,13 @@ def test_mcp_catalog_and_help(tmp_path: Path) -> None:
             "brain_write",
             "brain_search",
             "brain_ls",
-            "brain_task",
+            "brain_op",
         ]
 
         overview, error = app.call("brain_help", {})
         assert error is False
         assert "progressive disclosure" in overview
-        assert "brain_task" in overview
+        assert "brain_op" in overview
 
         tools_help, error = app.call("brain_help", {"topic": "tool"})
         assert error is False
@@ -40,7 +40,7 @@ def test_mcp_catalog_and_help(tmp_path: Path) -> None:
 
         history, error = app.call("brain_help", {"topic": "history"})
         assert error is False
-        assert "Пример:" in history and "brain_task(action=\"history\"" in history
+        assert "Пример:" in history and "brain_op(action=\"history\"" in history
 
         prefixed, error = app.call("brain_help", {"topic": "brain_diff"})
         assert error is False and "unified diff" in prefixed
@@ -79,21 +79,16 @@ def test_mcp_write_read_search_and_multiplexer(tmp_path: Path) -> None:
         assert json.loads(text)["nodes"][0]["path"] == "docs/a.md"
 
         text, error = app.call(
-            "brain_task", {"action": "history", "path": "docs/a.md"}
+            "brain_op", {"action": "history", "path": "docs/a.md"}
         )
         assert error is False
         assert json.loads(text)[0]["n"] == 1
 
-        text, error = app.call(
-            "brain_task",
-            {"action": "task_create", "title": "Задача", "body": "b", "area": ["docs"]},
-        )
-        assert error is False
-        task = json.loads(text)
-        assert task["id"].startswith("DOCS-")
+        text, error = app.call("brain_op", {"action": "task_create", "title": "x"})
+        assert error is True and "Доски задач нет" in text
 
-        text, error = app.call("brain_task", {"action": "task_list"})
-        assert error is False and json.loads(text)[0]["id"] == task["id"]
+        text, error = app.call("brain_op", {"action": "brief"})
+        assert error is False and "доски задач нет" in json.loads(text)["brief"]
     finally:
         service.close()
 
@@ -159,7 +154,7 @@ def test_mcp_errors_are_actionable_text(tmp_path: Path) -> None:
         assert error is True
         assert "не найден" in text.lower()
 
-        text, error = app.call("brain_task", {})
+        text, error = app.call("brain_op", {})
         assert error is True and "action" in text
 
         anonymous = BrainMCP(service, None)

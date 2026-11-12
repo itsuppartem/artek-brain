@@ -176,7 +176,7 @@ def test_http_sandbox_run_status_and_denials(tmp_path: Path) -> None:
         service.close()
 
 
-def test_mcp_help_topic_and_taskAction(tmp_path: Path) -> None:
+def test_mcp_help_topic_and_op_action(tmp_path: Path) -> None:
     service = Service(tmp_path / "brain")
     owner = str(service.access.create_token("owner", "owner"))
     agent = str(service.access.create_token("agent", "agent", [("docs", "read")]))
@@ -193,7 +193,7 @@ def test_mcp_help_topic_and_taskAction(tmp_path: Path) -> None:
         assert "POST /sandbox/run" in help_text
 
         text, error = app.call(
-            "brain_task",
+            "brain_op",
             {
                 "action": "sandbox_run",
                 "script": "import brainlib\nprint(brainlib.read('docs/a.md'))\n",

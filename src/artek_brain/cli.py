@@ -1,4 +1,4 @@
-"""CLI Artek Brain: тонкая оболочка над фасадом Brain и TaskBoard."""
+"""CLI Artek Brain: тонкая оболочка над фасадом Brain и координацией агентов."""
 
 from __future__ import annotations
 
@@ -217,23 +217,6 @@ def _print_text(command: str, data: Any) -> None:
     if command == "audit" and isinstance(data, list):
         for item in data:
             print(f"{item['ts']}  {item['actor']}  {item['action']}  {item.get('path') or ''}")
-        return
-    if command == "task" and isinstance(data, list):
-        for item in data:
-            print(
-                f"{item['id']}  [{item['status']}] p{item['priority']}  "
-                f"{item['title']}  ({item.get('assignee') or 'свободна'})"
-            )
-        return
-    if command == "task" and isinstance(data, dict) and "id" in data:
-        print(
-            f"{data['id']}  [{data['status']}] p{data['priority']}  "
-            f"revision={data['revision']}  {data['title']}"
-        )
-        if data.get("assignee"):
-            print(f"assignee: {data['assignee']}")
-        if data.get("body"):
-            print(data["body"])
         return
     if command == "inbox" and isinstance(data, list):
         for item in data:
@@ -483,38 +466,11 @@ def _parser() -> argparse.ArgumentParser:
     q_queue.add_argument("--prefix", default="")
     q_queue.add_argument("--limit", type=int, default=100)
 
-    task = add("task", "операции доски задач")
-    task.add_argument("action", help="create, list, show, claim, start, ...")
-    task.add_argument("target", nargs="?", default=None, help="id задачи, если нужен.")
-    task.add_argument("--title", default=None)
-    task.add_argument("--body", default=None)
-    task.add_argument("--area", action="append", default=None)
-    task.add_argument("--priority", type=int, default=None)
-    task.add_argument("--depends-on", dest="depends_on", action="append", default=None)
-    task.add_argument("--key", default=None)
-    task.add_argument("--revision", type=int, default=None)
-    task.add_argument("--minutes", type=int, default=None)
-    task.add_argument("--claim-token", default=None)
-    task.add_argument("--evidence", default=None)
-    task.add_argument("--note", default=None)
-    task.add_argument("--reason", default=None)
-    task.add_argument("--status", default=None)
-    task.add_argument("--assignee", default=None)
-    task.add_argument("--limit", type=int, default=None)
-    task.add_argument("--offset", type=int, default=None)
-    task.add_argument("--actor", default=None)
-    task.add_argument("--role", default=None)
-    task.add_argument("--activity", default=None)
-    task.add_argument("--ttl", dest="ttl_seconds", type=int, default=None)
-    task.add_argument("--to", default=None)
-    task.add_argument("--subject", default=None)
-    task.add_argument("--message-id", dest="message_id", action="append", type=int, default=None)
-    task.add_argument("--unread", action="store_true")
-    task.add_argument("--path", default=None)
-    task.add_argument("--done", default=None)
-    task.add_argument("--left", default=None)
-    task.add_argument("--important", default=None)
-    task.add_argument("--name", default=None)
+    coord = add("coord", "присутствие агентов и кто менял путь")
+    coord.add_argument("action", help="presence, agents, who-knows.")
+    coord.add_argument("--activity", default=None)
+    coord.add_argument("--ttl", dest="ttl_seconds", type=int, default=None)
+    coord.add_argument("--path", default=None)
 
     inbox = add("inbox", "входящие: list, send, read")
     inbox.add_argument("action", nargs="?", default="list")
@@ -553,18 +509,6 @@ def _parser() -> argparse.ArgumentParser:
     proposal_reject.add_argument("--reason", default=None)
     proposal_verify = proposal_sub.add_parser("verify", help="проверить дрейф approved/")
     _add_common(proposal_verify)
-
-    run = add("run", "серверный прогон проверки по задаче")
-    run.add_argument("task", help="id задачи.")
-    run.add_argument(
-        "--command", dest="check_command", default=None, help="Команда проверки."
-    )
-    run.add_argument("--seeds", type=int, default=None)
-    run.add_argument("--timeout", type=float, default=None)
-    run.add_argument("--workdir", default=None)
-    run.add_argument("--hidden-command", dest="hidden_command", default=None)
-    run.add_argument("--list", dest="list_runs", action="store_true", help="Показать прогоны.")
-    run.add_argument("--limit", type=int, default=50)
 
     anomaly = add("anomaly", "детекторы аномалий")
     anomaly_sub = anomaly.add_subparsers(dest="anomaly_command", required=True)
@@ -654,24 +598,6 @@ def _parse_lines(value: str | None) -> tuple[int | None, int | None]:
     if len(parts) != 2:
         raise ValueError("Диапазон строк задаётся как START:END, например 10:20.")
     return int(parts[0]), int(parts[1])
-
-
-def _task_params(args: argparse.Namespace) -> dict[str, Any]:
-    params: dict[str, Any] = {}
-    names = (
-        "title", "body", "area", "priority", "depends_on", "key", "revision",
-        "minutes", "claim_token", "evidence", "note", "reason", "status",
-        "assignee", "limit", "offset", "actor", "role", "activity",
-        "ttl_seconds", "to", "subject", "message_id", "unread", "path",
-        "done", "left", "important", "name",
-    )
-    for name in names:
-        value = getattr(args, name, None)
-        if value is not None:
-            params[name] = value
-    if getattr(args, "target", None):
-        params["task_id"] = args.target
-    return params
 
 
 def _read_script(name: str | None) -> str:
@@ -933,8 +859,13 @@ def _run(args: argparse.Namespace) -> Any:
             return service.maintain(token)
         if command == "quality":
             return _quality(service, token, args)
-        if command == "task":
-            return service.task(token, args.action, **_task_params(args))
+        if command == "coord":
+            params = {
+                key: getattr(args, key)
+                for key in ("activity", "ttl_seconds", "path")
+                if getattr(args, key) is not None
+            }
+            return service.coord_action(token, args.action, **params)
         if command == "inbox":
             params = {
                 key: value
@@ -983,18 +914,6 @@ def _run(args: argparse.Namespace) -> Any:
                 status=getattr(args, "status", None),
                 to=getattr(args, "to", None),
                 reason=getattr(args, "reason", None),
-            )
-        if command == "run":
-            if args.list_runs:
-                return service.run_list(token, task_id=args.task, limit=args.limit)
-            return service.run(
-                token,
-                args.task,
-                command=args.check_command,
-                seeds=args.seeds,
-                timeout=args.timeout,
-                workdir=args.workdir,
-                hidden_command=args.hidden_command,
             )
         if command == "anomaly":
             if args.anomaly_command == "scan":

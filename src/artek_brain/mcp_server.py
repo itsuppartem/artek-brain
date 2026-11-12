@@ -1,7 +1,7 @@
 """MCP stdio сервер Artek Brain с progressive disclosure.
 
 При старте клиент видит только шесть инструментов. Остальные операции
-доступны через brain_task(action=...) и описаны в brain_help(topic).
+доступны через brain_op(action=...) и описаны в brain_help(topic).
 Ответы ограничены по размеру, для продолжения отдаётся cursor.
 """
 
@@ -23,7 +23,7 @@ _TOOL_DEFS: list[dict[str, Any]] = [
         "name": "brain_help",
         "description": (
             "Справка по памяти. Без темы — обзор и список действий; с темой "
-            "(например read, history, rollback, task_claim) — схема и пример."
+            "(например read, history, rollback, inbox) — схема и пример."
         ),
         "inputSchema": {
             "type": "object",
@@ -118,10 +118,10 @@ _TOOL_DEFS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "brain_task",
+        "name": "brain_op",
         "description": (
             "Мультиплексор: action=history, diff, rollback, audit, stats, "
-            "task_create, task_claim, inbox, send и другие. "
+            "brief, inbox, send и другие. "
             "Схемы — в brain_help(\"<action>\")."
         ),
         "inputSchema": {
@@ -171,253 +171,172 @@ _ACTION_HELP: dict[str, tuple[str, str, str]] = {
         "brain_help(topic=\"history\")",
         "Возвращает текст справки.",
     ),
-    "task": (
-        "Мультиплексор brain_task. Параметр action плюс поля нужного действия.",
-        "brain_task(action=\"history\", path=\"docs/a.md\")",
+    "op": (
+        "Мультиплексор brain_op. Параметр action плюс поля нужного действия.",
+        "brain_op(action=\"history\", path=\"docs/a.md\")",
         "Схемы отдельных action — в brain_help(\"<action>\").",
     ),
     "sandbox": (
         "Песочница скриптов: python/shell выполняется изолированно (bwrap), "
         "сеть выключена, данные — read-only срез по inputs.prefix/paths, "
         "результат из stdout/stderr и /out. Новый стартовый MCP-инструмент "
-        "не добавлен: вызывайте через brain_task(action=\"sandbox_run\"). "
+        "не добавлен: вызывайте через brain_op(action=\"sandbox_run\"). "
         "CLI: brain sandbox run --lang python --paths docs/ script.py. "
         "HTTP: POST /sandbox/run (script, language, inputs, limits, cache).",
-        "brain_task(action=\"sandbox_run\", script=\"import brainlib; print(brainlib.documents())\", language=\"python\", inputs={\"prefix\": \"docs\"})",
+        "brain_op(action=\"sandbox_run\", script=\"import brainlib; print(brainlib.documents())\", language=\"python\", inputs={\"prefix\": \"docs\"})",
         "Возвращает exit_code, stdout, stderr, out, duration_ms, peak_memory_bytes, slice.",
     ),
     "sandbox_run": (
         "Запустить скрипт в песочнице. Параметры: script (текст), language, "
         "inputs (prefix/paths), limits, cache. Нужна роль agent и выше.",
-        "brain_task(action=\"sandbox_run\", script=\"print(1)\", language=\"python\")",
+        "brain_op(action=\"sandbox_run\", script=\"print(1)\", language=\"python\")",
         "Возвращает stdout/stderr, out, exit_code, время и пиковую память.",
     ),
     "sandbox_status": (
         "Статус запуска песочницы по id.",
-        "brain_task(action=\"sandbox_status\", job_id=\"...\")",
+        "brain_op(action=\"sandbox_status\", job_id=\"...\")",
         "Возвращает status и результат, если запуск завершён.",
     ),
     "sandbox_cancel": (
         "Отменить запуск песочницы по id.",
-        "brain_task(action=\"sandbox_cancel\", job_id=\"...\")",
+        "brain_op(action=\"sandbox_cancel\", job_id=\"...\")",
         "Убивает группу процессов и возвращает cancelled.",
     ),
     "history": (
         "История версий. Параметры: path (обязателен), limit=50, offset=0.",
-        "brain_task(action=\"history\", path=\"docs/a.md\", limit=10)",
+        "brain_op(action=\"history\", path=\"docs/a.md\", limit=10)",
         "Возвращает список версий: n, parent_n, sha256, author, ts, op, reason.",
     ),
     "diff": (
         "Сравнить версии. Параметры: path (обязателен), a, b.",
-        "brain_task(action=\"diff\", path=\"docs/a.md\", a=1, b=2)",
+        "brain_op(action=\"diff\", path=\"docs/a.md\", a=1, b=2)",
         "Возвращает unified diff.",
     ),
     "blame": (
         "Авторы разделов. Параметр: path.",
-        "brain_task(action=\"blame\", path=\"docs/a.md\")",
+        "brain_op(action=\"blame\", path=\"docs/a.md\")",
         "Возвращает title, level, version, author, ts по разделам.",
     ),
     "toc": (
         "Оглавление документа. Параметры: path, version.",
-        "brain_task(action=\"toc\", path=\"docs/a.md\")",
+        "brain_op(action=\"toc\", path=\"docs/a.md\")",
         "Возвращает разделы с chars и lines.",
     ),
     "links": (
         "Исходящие ссылки. Параметры: path, version.",
-        "brain_task(action=\"links\", path=\"docs/a.md\")",
+        "brain_op(action=\"links\", path=\"docs/a.md\")",
         "Возвращает source, target, exists, external.",
     ),
     "backlinks": (
         "Обратные ссылки. Параметр: path.",
-        "brain_task(action=\"backlinks\", path=\"docs/a.md\")",
+        "brain_op(action=\"backlinks\", path=\"docs/a.md\")",
         "Возвращает документы, которые ссылаются на path.",
     ),
     "broken_links": (
         "Битые ссылки. Параметр: prefix.",
-        "brain_task(action=\"broken_links\", prefix=\"docs\")",
+        "brain_op(action=\"broken_links\", prefix=\"docs\")",
         "Возвращает ссылки с exists=false.",
     ),
     "changes": (
         "Лента изменений после курсора. Параметры: cursor, limit=100.",
-        "brain_task(action=\"changes\", cursor=0, limit=50)",
+        "brain_op(action=\"changes\", cursor=0, limit=50)",
         "Возвращает items, cursor, next_cursor, has_more.",
     ),
     "readme": (
         "Карта памяти из README и верхнего уровня. Параметров нет.",
-        "brain_task(action=\"readme\")",
+        "brain_op(action=\"readme\")",
         "Возвращает readme, sections, links, top_level.",
     ),
     "delete": (
         "Мягко удалить документ. Параметры: path, reason (обязательны), "
         "base_version, batch_id.",
-        "brain_task(action=\"delete\", path=\"docs/a.md\", reason=\"устарело\")",
+        "brain_op(action=\"delete\", path=\"docs/a.md\", reason=\"устарело\")",
         "Возвращает version и op=delete; история сохраняется.",
     ),
     "restore": (
         "Восстановить документ. Параметры: path, reason (обязательны), "
         "base_version, batch_id.",
-        "brain_task(action=\"restore\", path=\"docs/a.md\", reason=\"вернуть\")",
+        "brain_op(action=\"restore\", path=\"docs/a.md\", reason=\"вернуть\")",
         "Возвращает version и op=restore.",
     ),
     "rollback_version": (
         "Откат к версии. Параметры: path, to_version, reason.",
-        "brain_task(action=\"rollback_version\", path=\"docs/a.md\", to_version=1, reason=\"ошибочная правка\")",
+        "brain_op(action=\"rollback_version\", path=\"docs/a.md\", to_version=1, reason=\"ошибочная правка\")",
         "Создаёт новую версию со старым содержимым.",
     ),
     "rollback_author": (
         "Откат правок автора за период. Параметры: author, since, until, reason.",
-        "brain_task(action=\"rollback_author\", author=\"agent-1\", since=\"2026-01-01\", reason=\"пачка\")",
+        "brain_op(action=\"rollback_author\", author=\"agent-1\", since=\"2026-01-01\", reason=\"пачка\")",
         "Возвращает rolled_back и skipped с причинами.",
     ),
     "rollback_batch": (
         "Откат пачки. Параметры: batch_id, reason.",
-        "brain_task(action=\"rollback_batch\", batch_id=\"b-1\", reason=\"ошибочная пачка\")",
+        "brain_op(action=\"rollback_batch\", batch_id=\"b-1\", reason=\"ошибочная пачка\")",
         "Возвращает rolled_back и skipped.",
     ),
     "export": (
         "Экспорт Markdown. Параметры: path, version.",
-        "brain_task(action=\"export\", path=\"docs/a.md\")",
+        "brain_op(action=\"export\", path=\"docs/a.md\")",
         "Возвращает content.",
     ),
     "audit": (
         "Журнал аудита (owner/auditor). Параметры: limit, actor, action, since.",
-        "brain_task(action=\"audit\", limit=20, action=\"write\")",
+        "brain_op(action=\"audit\", limit=20, action=\"write\")",
         "Возвращает записи ts, actor, action, path, detail.",
     ),
     "stats": (
         "Статистика (owner/auditor). Параметров нет.",
-        "brain_task(action=\"stats\")",
+        "brain_op(action=\"stats\")",
         "Возвращает documents, versions, bytes, top_authors, errors.",
     ),
     "who_knows": (
         "Кто последним менял путь. Параметр: path.",
-        "brain_task(action=\"who_knows\", path=\"docs/a.md\")",
+        "brain_op(action=\"who_knows\", path=\"docs/a.md\")",
         "Возвращает author, version, ts, reason.",
     ),
     "brief": (
         "Бриф агента. Параметр: limit=2000.",
-        "brain_task(action=\"brief\")",
-        "Возвращает короткий текст: задачи, области, handoff, inbox.",
-    ),
-    "task_create": (
-        "Создать задачу. Параметры: title, body, area (обязательны area), "
-        "priority, depends_on, key.",
-        "brain_task(action=\"task_create\", title=\"Fix API\", body=\"...\", area=[\"docs\"])",
-        "Возвращает задачу с id вида AREA-NNN.",
-    ),
-    "task_list": (
-        "Список задач. Параметры: status, assignee, area, priority, limit, offset.",
-        "brain_task(action=\"task_list\", status=\"todo\")",
-        "Возвращает задачи по приоритету и id.",
-    ),
-    "task_show": (
-        "Показать задачу. Параметр: task_id.",
-        "brain_task(action=\"task_show\", task_id=\"DOCS-001\")",
-        "Возвращает задачу целиком.",
-    ),
-    "task_claim": (
-        "Взять задачу в аренду. Параметры: task_id, revision (обязательны), minutes=30.",
-        "brain_task(action=\"task_claim\", task_id=\"DOCS-001\", revision=1, minutes=30)",
-        "Возвращает задачу и claim_token — сохраните его.",
-    ),
-    "task_start": (
-        "Начать взятую задачу. Параметры: task_id, revision, claim_token.",
-        "brain_task(action=\"task_start\", task_id=\"DOCS-001\", revision=2, claim_token=\"...\")",
-        "Переводит задачу в in_progress.",
-    ),
-    "task_heartbeat": (
-        "Продлить аренду. Параметры: claim_token, minutes=30, revision.",
-        "brain_task(action=\"task_heartbeat\", claim_token=\"...\", minutes=30)",
-        "Возвращает новый срок аренды.",
-    ),
-    "task_release": (
-        "Освободить задачу. Параметры: task_id, revision или claim_token.",
-        "brain_task(action=\"task_release\", task_id=\"DOCS-001\", claim_token=\"...\")",
-        "Возвращает задачу в todo.",
-    ),
-    "task_submit": (
-        "Отправить на ревью. Параметры: task_id, revision, evidence (обязательны), claim_token.",
-        "brain_task(action=\"task_submit\", task_id=\"DOCS-001\", revision=3, evidence=\"pytest -q: 100 passed\")",
-        "Переводит задачу в review.",
-    ),
-    "task_accept": (
-        "Принять задачу. Параметры: task_id, revision, note. Нужна роль reviewer/owner.",
-        "brain_task(action=\"task_accept\", task_id=\"DOCS-001\", revision=4)",
-        "Переводит задачу в done.",
-    ),
-    "task_rework": (
-        "Вернуть на доработку. Параметры: task_id, revision, reason.",
-        "brain_task(action=\"task_rework\", task_id=\"DOCS-001\", revision=4, reason=\"нет тестов\")",
-        "Переводит задачу в rework.",
-    ),
-    "task_block": (
-        "Заблокировать задачу. Параметры: task_id, revision, reason.",
-        "brain_task(action=\"task_block\", task_id=\"DOCS-001\", revision=2, reason=\"ждём API\")",
-        "Переводит задачу в blocked.",
-    ),
-    "task_cancel": (
-        "Отменить задачу. Параметры: task_id, revision, reason.",
-        "brain_task(action=\"task_cancel\", task_id=\"DOCS-001\", revision=2, reason=\"не нужна\")",
-        "Переводит задачу в cancelled.",
-    ),
-    "task_grant_role": (
-        "Выдать роль на доске (owner). Параметры: actor, role.",
-        "brain_task(action=\"task_grant_role\", actor=\"human-1\", role=\"reviewer\")",
-        "Роли: reviewer, owner, admin, agent, human, auditor.",
-    ),
-    "task_revoke_role": (
-        "Забрать роль на доске (owner). Параметры: actor, role.",
-        "brain_task(action=\"task_revoke_role\", actor=\"human-1\", role=\"reviewer\")",
-        "Удаляет роль у участника.",
-    ),
-    "task_roles": (
-        "Роли участника. Параметр: actor (по умолчанию вы).",
-        "brain_task(action=\"task_roles\", actor=\"agent-1\")",
-        "Возвращает список ролей.",
+        "brain_op(action=\"brief\")",
+        "Возвращает короткий текст: где ориентир, кто работает, последние правки, inbox.",
     ),
     "presence": (
         "Отметить агента онлайн. Параметр: activity.",
-        "brain_task(action=\"presence\", activity=\"пишу тесты\")",
+        "brain_op(action=\"presence\", activity=\"пишу тесты\")",
         "Возвращает name, last_seen, activity.",
     ),
     "agents": (
         "Кто онлайн. Параметр: ttl_seconds=300.",
-        "brain_task(action=\"agents\", ttl_seconds=600)",
+        "brain_op(action=\"agents\", ttl_seconds=600)",
         "Возвращает список присутствующих.",
-    ),
-    "handoff": (
-        "Сдать смену. Параметры: task, done, left, important.",
-        "brain_task(action=\"handoff\", task=\"DOCS-001\", done=\"сделал API\", left=\"тесты\")",
-        "Пишет handoffs/<task>.md в память.",
     ),
     "inbox": (
         "Входящие. Параметр: unread=true/false.",
-        "brain_task(action=\"inbox\", unread=True)",
+        "brain_op(action=\"inbox\", unread=True)",
         "Возвращает письма: id, sender, subject, body, read.",
     ),
     "send": (
         "Отправить письмо. Параметры: to, subject, body.",
-        "brain_task(action=\"send\", to=\"human-1\", subject=\"Готово\", body=\"...\")",
+        "brain_op(action=\"send\", to=\"human-1\", subject=\"Готово\", body=\"...\")",
         "Возвращает письмо; отправитель берётся из токена.",
     ),
     "mark_read": (
         "Отметить письма прочитанными. Параметр: message_id (число или список).",
-        "brain_task(action=\"mark_read\", message_id=[1, 2])",
+        "brain_op(action=\"mark_read\", message_id=[1, 2])",
         "Возвращает changed — сколько писем изменено.",
     ),
     "token_create": (
         "Создать токен (owner). Параметры: name, role, scopes, ttl.",
-        "brain_task(action=\"token_create\", name=\"agent-1\", role=\"agent\", scopes=[\"docs:write\"])",
+        "brain_op(action=\"token_create\", name=\"agent-1\", role=\"agent\", scopes=[\"docs:write\"])",
         "Возвращает token один раз и метаданные.",
     ),
     "token_list": (
         "Список токенов (owner). Параметров нет.",
-        "brain_task(action=\"token_list\")",
+        "brain_op(action=\"token_list\")",
         "Возвращает токены без секретов.",
     ),
     "token_revoke": (
         "Отозвать токен (owner). Параметры: token_id, value или name.",
-        "brain_task(action=\"token_revoke\", token_id=3)",
+        "brain_op(action=\"token_revoke\", token_id=3)",
         "Возвращает число отозванных.",
     ),
     "quality": (
@@ -431,8 +350,6 @@ _ACTION_HELP: dict[str, tuple[str, str, str]] = {
 
 _ALIASES = {
     "get": "read",
-    "show": "task_show",
-    "list": "task_list",
     "ls": "ls",
     "tree": "ls",
     "rollback": "rollback_version",
@@ -443,22 +360,6 @@ _ALIASES = {
     "inbox_list": "inbox",
     "inbox_send": "send",
     "inbox_read": "mark_read",
-    "task_claim": "task_claim",
-    "claim": "task_claim",
-    "start": "task_start",
-    "heartbeat": "task_heartbeat",
-    "release": "task_release",
-    "submit": "task_submit",
-    "accept": "task_accept",
-    "rework": "task_rework",
-    "block": "task_block",
-    "cancel": "task_cancel",
-    "grant_role": "task_grant_role",
-    "grant-role": "task_grant_role",
-    "revoke_role": "task_revoke_role",
-    "revoke-role": "task_revoke_role",
-    "roles": "task_roles",
-    "create": "task_create",
     "send": "send",
     "mark_read": "mark_read",
     "mark-read": "mark_read",
@@ -472,13 +373,7 @@ _MEMORY_ACTIONS = {
     "token_revoke", "sandbox_run", "sandbox_status", "sandbox_cancel",
 }
 
-_TASK_ACTIONS = {
-    "task_create", "task_list", "task_show", "task_claim", "task_start",
-    "task_heartbeat", "task_release", "task_submit", "task_accept",
-    "task_rework", "task_block", "task_cancel", "task_grant_role",
-    "task_revoke_role", "task_roles", "presence", "agents", "handoff",
-    "inbox", "send", "mark_read",
-}
+_COORD_ACTIONS = {"presence", "agents", "inbox", "send", "mark_read"}
 
 
 def _canonical(action: str) -> str:
@@ -536,10 +431,10 @@ class BrainMCP:
                 "- brain_write(path, content, reason, ...) — запись;",
                 "- brain_search(query, ...) — поиск;",
                 "- brain_ls(prefix, tree) — навигация;",
-                "- brain_task(action, ...) — все остальные операции.",
+                "- brain_op(action, ...) — все остальные операции.",
                 "",
-                "Остальное вызывается через brain_task(action=\"...\"):",
-                ", ".join(sorted(_MEMORY_ACTIONS | _TASK_ACTIONS)),
+                "Остальное вызывается через brain_op(action=\"...\"):",
+                ", ".join(sorted(_MEMORY_ACTIONS | _COORD_ACTIONS)),
                 "",
                 "Качество знаний: brain_help(topic=\"quality\") и CLI "
                 "brain quality report|drift|dups|contradictions|queue.",
@@ -574,7 +469,7 @@ class BrainMCP:
             "brain_write": 'brain_write(path="docs/a.md", content="# A", reason="правка", base_version=1)',
             "brain_search": 'brain_search(query="деплой", path_prefix="docs")',
             "brain_ls": 'brain_ls(prefix="docs", tree=True)',
-            "brain_task": 'brain_task(action="diff", path="docs/a.md", a=1, b=2)',
+            "brain_op": 'brain_op(action="diff", path="docs/a.md", a=1, b=2)',
         }
         lines = ["# Инструменты MCP", ""]
         for item in _TOOL_DEFS:
@@ -587,8 +482,8 @@ class BrainMCP:
                 "",
             ]
         lines += [
-            "Остальные действия — через brain_task(action=...):",
-            ", ".join(sorted(_MEMORY_ACTIONS | _TASK_ACTIONS)),
+            "Остальные действия — через brain_op(action=...):",
+            ", ".join(sorted(_MEMORY_ACTIONS | _COORD_ACTIONS)),
         ]
         return "\n".join(lines)
 
@@ -632,16 +527,14 @@ class BrainMCP:
             self.token, prefix, tree=bool(tree), max_depth=max_depth
         )
 
-    def task(self, action: str, **params: Any) -> Any:
-        """Мультиплексор действий памяти, задач, inbox и токенов."""
+    def op(self, action: str, **params: Any) -> Any:
+        """Мультиплексор действий памяти, писем, присутствия и токенов."""
         params.pop("cursor", None)
         key = _canonical(action)
         if key in _MEMORY_ACTIONS:
             method = getattr(self.service, key)
             return self._invoke(method, params)
-        if key.startswith("task_") and len(key) > 5:
-            key = key[5:]
-        return self.service.task(self.token, key, **params)
+        return self.service.coord_action(self.token, key, **params)
 
     def _invoke(self, method: Callable[..., Any], params: dict[str, Any]) -> Any:
         """Вызвать метод Service, отбросив лишние kwargs."""
@@ -679,14 +572,14 @@ class BrainMCP:
                 result = self.search(**args)
             elif name == "brain_ls":
                 result = self.ls(**args)
-            elif name == "brain_task":
+            elif name == "brain_op":
                 action = args.pop("action", "")
                 if not action:
                     raise ValidationError(
                         "Не указан action.",
                         hint="Список действий: brain_help().",
                     )
-                result = self.task(action, **args)
+                result = self.op(action, **args)
             else:
                 raise ValidationError(
                     f"Неизвестный инструмент «{name}».",

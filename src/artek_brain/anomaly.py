@@ -120,13 +120,13 @@ class AnomalyDetector:
         store: Any,
         *,
         access: Access | None = None,
-        board: Any = None,
+        coord: Any = None,
         config: AnomalyConfig | Mapping[str, Any] | None = None,
         clock: Any = None,
     ) -> None:
         self.store = store
         self.access = access
-        self.board = board
+        self.coord = coord
         self._clock = clock or _utc_now
         self._lock = threading.RLock()
         if isinstance(config, AnomalyConfig):
@@ -470,9 +470,9 @@ class AnomalyDetector:
             )
         except ArtekBrainError:
             return path
-        if self.board is not None:
+        if self.coord is not None:
             try:
-                self.board.send(
+                self.coord.send(
                     "owner",
                     f"Инцидент: {item['kind']}",
                     content,

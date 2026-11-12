@@ -60,10 +60,6 @@ def _token(root: Path, owner: str, name: str, role: str, scope: str) -> str:
     )["token"]
 
 
-def python_command(code: str) -> str:
-    return f'{sys.executable} -c "{code}"'
-
-
 def test_cli_proposal_list_approve_reject(tmp_path: Path) -> None:
     root = tmp_path / "brain"
     owner = _init(root)
@@ -134,70 +130,6 @@ def test_cli_token_suspend_and_resume(tmp_path: Path) -> None:
     )
     assert resumed["resumed"] == 1
     assert _run(root, "read", "docs/a.md", token=agent).returncode == 0
-
-
-def test_cli_run_records_servertest(tmp_path: Path) -> None:
-    root = tmp_path / "brain"
-    owner = _init(root)
-    agent = _token(root, owner, "agent-1", "agent", "docs:write")
-
-    task = _json(
-        _run(
-            root,
-            "--json",
-            "task",
-            "create",
-            "--title",
-            "Проверка",
-            "--body",
-            "нужен прогон",
-            "--area",
-            "docs",
-            "--key",
-            "DOC",
-            token=owner,
-        )
-    )
-    claim = _run(
-        root, "--json", "task", "claim", task["id"], "--revision", "1", token=agent
-    )
-    assert claim.returncode == 0, claim.stderr
-    assert "agent-1" in claim.stdout
-
-    (root / "settings.json").write_text(
-        json.dumps(
-            {
-                "runs": {
-                    "docs": {
-                        "command": python_command("import sys; sys.exit(0)"),
-                        "seeds": 2,
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    work = tmp_path / "work"
-    work.mkdir()
-    record = _json(
-        _run(
-            root,
-            "--json",
-            "run",
-            task["id"],
-            "--workdir",
-            str(work),
-            token=agent,
-        )
-    )
-    assert record["status"] == "pass"
-    assert record["pass_rate"] == 1.0
-    assert record["system"] is True
-
-    listed = _json(
-        _run(root, "--json", "run", task["id"], "--list", token=agent)
-    )
-    assert [item["id"] for item in listed] == [record["id"]]
 
 
 def test_cli_anomaly_scan_suspends_spike(tmp_path: Path) -> None:
