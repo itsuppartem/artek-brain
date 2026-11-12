@@ -388,6 +388,26 @@ class Service:
         )
         return _jsonable(result)
 
+    def overwrite(
+        self,
+        token: str | None,
+        path: str,
+        content: str,
+        *,
+        session: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Правка текущей версии на месте без новой версии и журнала (владелец)."""
+        return _jsonable(
+            self.brain.overwrite(
+                token or "",
+                path,
+                content,
+                session=session,
+                model=model,
+            )
+        )
+
     def delete(
         self,
         token: str | None,

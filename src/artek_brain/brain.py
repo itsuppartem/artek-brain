@@ -248,6 +248,40 @@ class Brain:
         self._update_semantic(path)
         return result
 
+    def overwrite(
+        self,
+        token: str,
+        path: str,
+        content: str,
+        *,
+        session: str | None = None,
+        model: str | None = None,
+    ) -> WriteResult:
+        """Правка текущей версии на месте без новой версии и без журнала.
+
+        Только для владельца: это сознательный отказ от истории и следа.
+        """
+        path = self._normalize(path)
+        principal = self._guard_write(token, "write", path)
+        if principal.role != "owner":
+            exc = PermissionDenied(
+                "overwrite",
+                path,
+                "owner",
+                actor=principal.name,
+                reason="правка на горячую доступна только владельцу",
+            )
+            self._deny("write", path, exc)
+            raise exc
+        if self.approval_guard is not None:
+            self.approval_guard(principal, path, content)
+        result = self.store.overwrite_current(
+            path, content, principal.name, session=session, model=model
+        )
+        self.search_engine.update(path)
+        self._update_semantic(path)
+        return result
+
     def delete(
         self,
         token: str,
