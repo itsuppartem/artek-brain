@@ -1,13 +1,12 @@
 """Общий слой операций интерфейсов Artek Brain (CLI, HTTP, MCP).
 
-Слой только вызывает публичный фасад Brain, Access и TaskBoard. В ядре
+Слой только вызывает публичный фасад Brain, Access и Coordination. В ядре
 по-прежнему нет сети и LLM. Все методы принимают токен и возвращают данные,
 готовые к JSON-сериализации.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from types import TracebackType
@@ -16,16 +15,14 @@ from typing import Any, Iterable, Mapping
 from .access import Access, IssuedToken, Principal
 from .anomaly import AnomalyConfig, AnomalyDetector
 from .brain import Brain
+from .coord import Coordination
 from .errors import PermissionDenied, ValidationError
-from .evidence import EvidenceChecker
 from .proposals import ProposalStore
 from .quota import Quota
 from .review_queue import ReviewQueue
-from .runs import Runner
 from .registry import Registry
 from .sandbox import Sandbox, SandboxConfig, SandboxLimits
 from .store import Store
-from .tasks import TaskBoard
 
 _SANDBOX_SCHEMA = {
     "type": "object",
@@ -95,24 +92,6 @@ def _as_list(value: Iterable[Any] | str | None) -> list[Any] | None:
     return cleaned or None
 
 
-def _load_area_config(root: Path) -> dict[str, Any]:
-    """Прочитать настройки проверок областей из settings.json (блок runs)."""
-    target = root / "settings.json"
-    if not target.is_file():
-        return {}
-    try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValidationError(
-            "Не удалось прочитать settings.json с настройками прогонов.",
-            hint="Исправьте JSON или удалите блок runs.",
-        ) from exc
-    if not isinstance(raw, dict):
-        return {}
-    block = raw.get("runs")
-    return block if isinstance(block, dict) else {}
-
-
 def _as_int(value: Any, name: str) -> int | None:
     """Привести значение к int с понятной ошибкой."""
     if value is None or isinstance(value, bool):
@@ -129,14 +108,13 @@ def _as_int(value: Any, name: str) -> int | None:
 
 
 class Service:
-    """Экземпляр хранилища, токенов, поиска и доски задач."""
+    """Экземпляр хранилища, токенов, поиска и координации агентов."""
 
     def __init__(
         self,
         root: str | Path | None = None,
         *,
         quota: Quota | None = None,
-        max_claims: int = 2,
         repo_root: str | Path | None = None,
     ) -> None:
         self.root = resolve_root(root)
@@ -144,27 +122,11 @@ class Service:
         self.store = Store(self.root, quota=quota)
         self.access = Access.for_store(self.store)
         self.brain = Brain(self.store, self.access)
-        self.runs = Runner(
-            self.store,
-            workdir=repo_root or Path.cwd(),
-            hidden_dir=self.root / "hidden",
-            area_config=_load_area_config(self.root),
-        )
-        self.evidence = EvidenceChecker(
-            self.store,
-            runs=self.runs,
-            repo_root=repo_root or Path.cwd(),
-        )
         self.review_queue = ReviewQueue(self.store, self.access)
-        self.board = TaskBoard(
-            self.store,
-            max_claims=max_claims,
-            evidence_checker=self.evidence,
-            review_queue=self.review_queue,
-        )
+        self.coord = Coordination(self.store)
         self.proposals = ProposalStore(self.store, self.access)
         self.anomalies = AnomalyDetector(
-            self.store, access=self.access, board=self.board
+            self.store, access=self.access, coord=self.coord
         )
         self.brain.approval_guard = self.proposals.guard_write
         self.sandbox = Sandbox(SandboxConfig(), self.store, self.access)
@@ -969,7 +931,7 @@ class Service:
     def who_knows(self, token: str | None, path: str) -> dict[str, Any] | None:
         """Кто последним менял путь."""
         self.principal(token)
-        return _jsonable(self.board.who_knows(path))
+        return _jsonable(self.coord.who_knows(path))
 
     # ------------------------------------------------------------------
     # Песочница и реестр инструментов
@@ -1023,168 +985,29 @@ class Service:
         return _jsonable(self.registry.list_tools())
 
     # ------------------------------------------------------------------
-    # Доска задач, inbox и бриф
+    # Письма, присутствие и бриф
     # ------------------------------------------------------------------
-    def task(self, token: str | None, action: str, **params: Any) -> Any:
-        """Мультиплексор операций доски задач.
+    def coord_action(self, token: str | None, action: str, **params: Any) -> Any:
+        """Мультиплексор координации: письма, присутствие, who_knows, бриф.
 
-        Автор, агент и отправитель всегда берутся из токена.
+        Автор и отправитель всегда берутся из токена. Доски задач нет.
         """
         principal = self.principal(token)
         action = str(action or "").strip().lower().replace("-", "_")
-        if action.startswith("task_") and len(action) > 5:
-            action = action[5:]
         name = principal.name
-        task_id = params.get("task_id") or params.get("id") or params.get("target")
-
-        if action == "create":
-            task = self.board.create(
-                params.get("title") or "",
-                params.get("body") or "",
-                area=_as_list(params.get("area")) or [],
-                author=name,
-                priority=_as_int(params.get("priority"), "priority") or 2,
-                depends_on=_as_list(params.get("depends_on")),
-                key=params.get("key"),
-            )
-            return _jsonable(task)
-        if action in ("list", "ls"):
-            status = params.get("status")
-            if isinstance(status, str) and "," in status:
-                status = _as_list(status)
-            tasks = self.board.list(
-                status=status,
-                assignee=params.get("assignee"),
-                area=params.get("area") if isinstance(params.get("area"), str) else None,
-                priority=_as_int(params.get("priority"), "priority"),
-                limit=_as_int(params.get("limit"), "limit"),
-                offset=_as_int(params.get("offset"), "offset") or 0,
-            )
-            return _jsonable(tasks)
-        if action in ("show", "get"):
-            return _jsonable(self.board.show(str(task_id or "")))
-        if action == "claim":
-            claim = self.board.claim(
-                str(task_id or ""),
-                name,
-                revision=int(_as_int(params.get("revision"), "revision") or 0),
-                minutes=_as_int(params.get("minutes"), "minutes") or 30,
-            )
-            return _jsonable(claim)
-        if action == "start":
-            return _jsonable(
-                self.board.start(
-                    str(task_id or ""),
-                    name,
-                    revision=int(_as_int(params.get("revision"), "revision") or 0),
-                    token=params.get("claim_token"),
-                )
-            )
-        if action == "heartbeat":
-            claim = self.board.heartbeat(
-                str(params.get("claim_token") or ""),
-                minutes=_as_int(params.get("minutes"), "minutes") or 30,
-                revision=_as_int(params.get("revision"), "revision"),
-            )
-            return _jsonable(claim)
-        if action == "release":
-            claim_token = params.get("claim_token")
-            revision = _as_int(params.get("revision"), "revision")
-            if claim_token:
-                task = self.board.release(
-                    str(task_id or ""), token=str(claim_token), revision=revision
-                )
-            else:
-                task = self.board.release(
-                    str(task_id or ""), name, revision=revision
-                )
-            return _jsonable(task)
-        if action == "submit":
-            return _jsonable(
-                self.board.submit(
-                    str(task_id or ""),
-                    name,
-                    evidence=params.get("evidence"),
-                    revision=int(_as_int(params.get("revision"), "revision") or 0),
-                    token=params.get("claim_token"),
-                    body=params.get("body"),
-                )
-            )
-        if action in ("accept", "rework"):
-            self._ensure_reviewer(principal)
-        if action == "accept":
-            return _jsonable(
-                self.board.accept(
-                    str(task_id or ""),
-                    name,
-                    revision=int(_as_int(params.get("revision"), "revision") or 0),
-                    note=params.get("note") or "",
-                )
-            )
-        if action == "rework":
-            return _jsonable(
-                self.board.rework(
-                    str(task_id or ""),
-                    name,
-                    revision=int(_as_int(params.get("revision"), "revision") or 0),
-                    reason=params.get("reason") or "",
-                    note=params.get("note"),
-                )
-            )
-        if action == "block":
-            return _jsonable(
-                self.board.block(
-                    str(task_id or ""),
-                    name,
-                    revision=int(_as_int(params.get("revision"), "revision") or 0),
-                    reason=params.get("reason") or "",
-                )
-            )
-        if action == "cancel":
-            return _jsonable(
-                self.board.cancel(
-                    str(task_id or ""),
-                    name,
-                    revision=int(_as_int(params.get("revision"), "revision") or 0),
-                    reason=params.get("reason") or "",
-                )
-            )
-        if action in ("grant_role", "role_grant", "grant"):
-            self._require_owner(token, "task_grant_role")
-            actor = str(params.get("actor") or params.get("name") or "")
-            self.board.grant_role(actor, str(params.get("role") or ""))
-            return {"actor": actor, "role": params.get("role")}
-        if action in ("revoke_role", "role_revoke", "revoke"):
-            self._require_owner(token, "task_revoke_role")
-            actor = str(params.get("actor") or params.get("name") or "")
-            self.board.revoke_role(actor, str(params.get("role") or ""))
-            return {"actor": actor, "role": params.get("role")}
-        if action == "roles":
-            actor = str(params.get("actor") or params.get("name") or name)
-            return {"actor": actor, "roles": sorted(self.board.roles(actor))}
         if action == "presence":
-            return _jsonable(self.board.presence(name, params.get("activity") or ""))
+            return _jsonable(self.coord.presence(name, params.get("activity") or ""))
         if action in ("agents", "agents_online"):
             return _jsonable(
-                self.board.agents_online(
+                self.coord.agents_online(
                     ttl_seconds=_as_int(params.get("ttl_seconds"), "ttl_seconds") or 300
                 )
             )
         if action in ("who_knows", "who"):
-            return _jsonable(self.board.who_knows(str(params.get("path") or "")))
-        if action == "handoff":
-            return _jsonable(
-                self.board.handoff(
-                    str(params.get("task") or task_id or ""),
-                    params.get("done") or "",
-                    params.get("left") or "",
-                    params.get("important", ""),
-                    author=name,
-                )
-            )
+            return _jsonable(self.coord.who_knows(str(params.get("path") or "")))
         if action == "send":
             return _jsonable(
-                self.board.send(
+                self.coord.send(
                     str(params.get("to") or ""),
                     params.get("subject") or "",
                     params.get("body") or "",
@@ -1193,7 +1016,7 @@ class Service:
             )
         if action == "inbox":
             return _jsonable(
-                self.board.inbox(name, bool(params.get("unread", False)))
+                self.coord.inbox(name, bool(params.get("unread", False)))
             )
         if action in ("mark_read", "read"):
             message_id = params.get("message_id")
@@ -1202,27 +1025,26 @@ class Service:
                     "Не указан message_id.",
                     hint="Возьмите id из inbox(action='inbox').",
                 )
-            changed = self.board.mark_read(message_id, name)
+            changed = self.coord.mark_read(message_id, name)
             return {"changed": changed}
         if action == "brief":
             return {
                 "agent": name,
-                "brief": self.board.brief(
+                "brief": self.coord.brief(
                     name, limit=_as_int(params.get("limit"), "limit") or 2000
                 ),
             }
         raise ValidationError(
-            f"Неизвестное действие задачи «{action}».",
+            f"Неизвестное действие «{action}».",
             hint=(
-                "Допустимые действия: create, list, show, claim, start, "
-                "heartbeat, release, submit, accept, rework, block, cancel, "
-                "grant-role, revoke-role, roles, presence, agents, who-knows, "
-                "handoff, send, inbox, mark-read, brief."
+                "Доступно: presence, agents, who-knows, send, inbox, mark-read, "
+                "brief. Доски задач нет: ориентир — заметки в памяти "
+                "(projects/pilot/backlog.md)."
             ),
         )
 
     # ------------------------------------------------------------------
-    # Предложения, прогоны и аномалии
+    # Предложения и аномалии
     # ------------------------------------------------------------------
     def proposal(self, token: str | None, action: str, **params: Any) -> Any:
         """Мультиплексор предложений: list, show, approve, reject, verify."""
@@ -1275,68 +1097,6 @@ class Service:
             hint="Допустимо: list, show, approve, reject, verify.",
         )
 
-    def run(
-        self,
-        token: str | None,
-        task_id: str,
-        *,
-        command: str | None = None,
-        seeds: int | None = None,
-        timeout: float | None = None,
-        workdir: str | None = None,
-        hidden_command: str | None = None,
-    ) -> dict[str, Any]:
-        """Запустить проверку для задачи от имени токена и записать прогон."""
-        principal = self.principal(token)
-        task = self.board.show(task_id)
-        if principal.role not in ("owner", "human") and task.assignee != principal.name:
-            raise PermissionDenied(
-                "run",
-                task.id,
-                "write",
-                actor=principal.name,
-                reason="запускать проверку может арендатор задачи или owner",
-            )
-        if principal.role not in ("owner", "human") and (
-            command is not None or hidden_command is not None
-        ):
-            raise PermissionDenied(
-                "run",
-                task.id,
-                "owner",
-                actor=principal.name,
-                reason=(
-                    "агент не задаёт команду и скрытые проверки: "
-                    "они берутся из настроек области"
-                ),
-            )
-        area = task.area[0] if task.area else None
-        record = self.runs.run(
-            principal.name,
-            task_id=task.id,
-            area=area,
-            command=command,
-            seeds=seeds,
-            timeout=timeout,
-            workdir=workdir,
-            hidden_command=hidden_command,
-        )
-        return _jsonable(record)
-
-    def run_list(
-        self,
-        token: str | None,
-        *,
-        task_id: str | None = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Список прогонов (агент видит только свои)."""
-        principal = self.principal(token)
-        actor = None if principal.role in ("owner", "human", "auditor") else principal.name
-        return _jsonable(
-            self.runs.list(actor=actor, task_id=task_id, limit=limit)
-        )
-
     def anomaly_scan(
         self,
         token: str | None,
@@ -1374,13 +1134,6 @@ class Service:
             self.anomalies.incidents(actor=actor, kind=kind, limit=limit)
         )
 
-    def _ensure_reviewer(self, principal: Principal) -> None:
-        """Владельцу токена автоматически дать право ревью на доске."""
-        if principal.role == "owner":
-            roles = self.board.roles(principal.name)
-            if "owner" not in roles:
-                self.board.grant_role(principal.name, "owner")
-
     def inbox(
         self,
         token: str | None,
@@ -1390,11 +1143,11 @@ class Service:
         """Список входящих, отправка или отметка прочтения."""
         action = (action or "list").strip().lower().replace("-", "_")
         if action in ("list", "ls", ""):
-            return self.task(token, "inbox", **params)
+            return self.coord_action(token, "inbox", **params)
         if action == "send":
-            return self.task(token, "send", **params)
+            return self.coord_action(token, "send", **params)
         if action in ("read", "mark_read"):
-            return self.task(token, "mark_read", **params)
+            return self.coord_action(token, "mark_read", **params)
         raise ValidationError(
             f"Неизвестное действие inbox «{action}».",
             hint="Допустимо: list, send, read.",
@@ -1405,7 +1158,7 @@ class Service:
         principal = self.principal(token)
         return {
             "agent": principal.name,
-            "brief": self.board.brief(
+            "brief": self.coord.brief(
                 principal.name, limit=_as_int(limit, "limit") or 2000
             ),
         }

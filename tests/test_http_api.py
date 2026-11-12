@@ -179,30 +179,18 @@ def test_http_body_limit_and_token_endpoints(tmp_path: Path) -> None:
         service.close()
 
 
-def test_http_tasks_inbox_and_brief(tmp_path: Path) -> None:
+def test_http_no_tasks_inbox_agents_and_brief(tmp_path: Path) -> None:
     service = Service(tmp_path / "brain")
     owner = str(service.access.create_token("owner", "owner"))
     agent = str(service.access.create_token("agent", "agent", [("docs", "write")]))
     server, client = _start(service)
     try:
-        status, task = client.call(
-            "POST",
-            "/tasks",
-            {"title": "HTTP task", "body": "body", "area": ["docs"]},
-            token=owner,
-        )
-        assert status == 200 and task["id"].startswith("DOCS-")
+        status, _ = client.call("GET", "/tasks", token=owner)
+        assert status == 404
 
-        status, claimed = client.call(
-            "POST",
-            f"/tasks/{task['id']}/claim",
-            {"revision": 1},
-            token=agent,
-        )
-        assert status == 200 and claimed["status"] == "claimed"
-
-        status, listed = client.call("GET", "/tasks", token=agent)
-        assert status == 200 and listed[0]["id"] == task["id"]
+        service.coord_action(agent, "presence", activity="читаю backlog")
+        status, online = client.call("GET", "/agents", token=owner)
+        assert status == 200 and online[0]["name"] == "agent"
 
         status, sent = client.call(
             "POST",
