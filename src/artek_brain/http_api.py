@@ -267,6 +267,14 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
                 session=_body_value(body, "session"),
                 model=_body_value(body, "model"),
             )
+        if head == "overwrite" and method == "POST":
+            return service.overwrite(
+                token,
+                _body_value(body, "path") or _q1(query, "path"),
+                _body_value(body, "content", default=""),
+                session=_body_value(body, "session"),
+                model=_body_value(body, "model"),
+            )
         if head == "history" and method == "GET":
             return service.history(
                 token,

@@ -832,6 +832,89 @@ class Store:
             model=model,
         )
 
+    def overwrite_current(
+        self,
+        path: str,
+        content: str,
+        author: str,
+        *,
+        session: str | None = None,
+        model: str | None = None,
+    ) -> WriteResult:
+        """Перезаписать текущую версию документа на месте.
+
+        Новая версия не создаётся, запись в журнал не делается: это правка
+        «на горячую» для владельца. Прошлые версии и их история не трогаются.
+        Текущая версия — это вершина цепочки дельт, от неё ничего не зависит,
+        поэтому замена её содержимого безопасна. Для нового документа создаётся
+        обычная первая версия (от неё отказаться нельзя).
+        """
+        path = self._normalize_path(path)
+        self._require_text(content)
+        self._validate_author(author)
+        secret_scanner.assert_clean(content, path)
+        data = content.encode("utf-8")
+        self.quota.check_document_size(len(data), path)
+        with self._lock:
+            self._ensure_open()
+            with self._conn:
+                doc = self._get_doc_locked(path)
+                if doc is None or doc["deleted"]:
+                    # Нет текущей версии для замены — делаем обычную запись
+                    # (создание или воскрешение), но без следа в журнале.
+                    result = self._write_locked(
+                        path,
+                        content,
+                        author,
+                        "правка на горячую",
+                        None if doc is None else int(doc["current_version"]),
+                        None,
+                        None,
+                    )
+                    return result
+                current_n = int(doc["current_version"])
+                current = self._version_info(self._version_row_locked(path, current_n))
+                new_sha = _sha256(data)
+                if current.sha256 == new_sha:
+                    return WriteResult(
+                        path=path,
+                        version=current_n,
+                        parent_version=current.parent_n,
+                        sha256=current.sha256,
+                        size=current.size,
+                        op="noop",
+                        created=False,
+                        merged=False,
+                        changed=False,
+                        batch_id=None,
+                    )
+                base_data: bytes | None = None
+                if current.parent_n is not None:
+                    base = self._version_info(
+                        self._version_row_locked(path, current.parent_n)
+                    )
+                    base_data = self._read_blob(base.sha256).encode("utf-8")
+                sha, size = self.storage.put_version(
+                    path, current_n, current.parent_n, data, base_data
+                )
+                ts = _format_ts(_utc_now())
+                self._conn.execute(
+                    "UPDATE versions SET sha256=?, size=?, ts=? WHERE path=? AND n=?",
+                    (sha, size, ts, path, current_n),
+                )
+                return WriteResult(
+                    path=path,
+                    version=current_n,
+                    parent_version=current.parent_n,
+                    sha256=sha,
+                    size=size,
+                    op="overwrite",
+                    created=False,
+                    merged=False,
+                    changed=True,
+                    batch_id=None,
+                )
+
     def _run_write(
         self,
         path: str,
