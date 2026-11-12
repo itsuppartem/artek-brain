@@ -401,7 +401,7 @@ class ReviewPermissionError(TaskError):
         super().__init__(
             (
                 f"Агент {actor} не может принять/вернуть задачу «{task.id}»: "
-                f"нужна роль reviewer/owner и нельзя быть автором задачи."
+                f"нужна роль reviewer/owner и нельзя принимать работу, которую делал сам."
             ),
             hint="Попросите reviewer или owner выполнить действие.",
         )
@@ -751,7 +751,9 @@ class TaskBoard:
         return {row["role"] for row in rows}
 
     def _require_reviewer(self, task: Task, actor: str) -> None:
-        if actor == task.author:
+        # Проверять нельзя собственную работу: исполнитель не принимает себя.
+        # Автор (постановщик) принимать может: он ставит задачу, исполняет другой.
+        if actor == task.assignee:
             raise ReviewPermissionError(task, actor)
         if not (self._roles_locked(actor) & REVIEWER_ROLES):
             raise ReviewPermissionError(task, actor)
@@ -1319,7 +1321,7 @@ class TaskBoard:
         revision: int,
         note: str = "",
     ) -> Task:
-        """Принять задачу из review в done (reviewer/owner, не автор)."""
+        """Принять задачу из review в done (reviewer/owner, не исполнитель)."""
         actor_name = self._require_name(actor, "actor")
         with self._lock:
             self._store._ensure_open()
@@ -1350,7 +1352,7 @@ class TaskBoard:
         reason: str = "",
         note: str | None = None,
     ) -> Task:
-        """Вернуть задачу из review на доработку (reviewer/owner, не автор)."""
+        """Вернуть задачу из review на доработку (reviewer/owner, не исполнитель)."""
         actor_name = self._require_name(actor, "actor")
         text = note if note is not None else reason
         text = self._require_text(text, "reason")

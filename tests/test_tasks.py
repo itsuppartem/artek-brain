@@ -139,6 +139,17 @@ def test_submit_requires_evidence(board: TaskBoard) -> None:
         board.submit(task.id, "alice", evidence=123, revision=claim.revision)  # type: ignore[arg-type]
 
 
+def test_author_can_accept_work_done_by_another(board: TaskBoard) -> None:
+    task = make_task(board, author="lead")
+    claim = board.claim(task.id, "worker", revision=task.revision)
+    review = board.submit(task.id, "worker", evidence="тесты", revision=claim.revision)
+    board.grant_role("lead", "reviewer")
+    board.grant_role("worker", "reviewer")
+    with pytest.raises(ReviewPermissionError):
+        board.accept(task.id, "worker", revision=review.revision)
+    assert board.accept(task.id, "lead", revision=review.revision).status == "done"
+
+
 def test_author_cannot_accept_own_task_even_as_reviewer(board: TaskBoard) -> None:
     task = make_task(board, author="alice")
     claim = board.claim(task.id, "alice", revision=task.revision)
