@@ -80,7 +80,7 @@ def test_brief_points_to_notes(tmp_path: Path) -> None:
 
     text = coord.brief("agent-1")
 
-    assert "projects/autoexpertrs/backlog.md" in text
+    assert "README.md и backlog.md" in text
     assert "Сейчас работают: 1" in text
     assert "docs/a.md v1" in text
     assert "Inbox: 1 непрочитанных" in text

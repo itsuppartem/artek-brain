@@ -51,3 +51,18 @@ def brain(store: Store, access):
         yield instance
     finally:
         instance.close()
+
+
+def pytest_collection_modifyitems(config, items):  # noqa: ANN001
+    """Тесты песочницы запускают systemd-run; на рабочей машине это окна
+    с паролем (polkit). По умолчанию пропускаем, включение: BRAIN_SANDBOX_TESTS=1."""
+    import os
+
+    import pytest
+
+    if os.environ.get("BRAIN_SANDBOX_TESTS") == "1":
+        return
+    skip = pytest.mark.skip(reason="песочница: BRAIN_SANDBOX_TESTS=1 для запуска")
+    for item in items:
+        if item.fspath.basename.startswith("test_sandbox"):
+            item.add_marker(skip)
