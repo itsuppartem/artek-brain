@@ -54,13 +54,19 @@ DEFAULT_ROOT = ".brain"
 
 
 def resolve_root(root: str | Path | None = None) -> Path:
-    """Найти каталог хранилища: аргумент, BRAIN_HOME или ./.brain."""
+    """Найти каталог хранилища: аргумент, BRAIN_HOME, ближайший .brain вверх
+    от текущего каталога (так git-копии агентов видят память проекта) или ./.brain."""
     if root is not None:
         return Path(root).expanduser()
     env = os.environ.get("BRAIN_HOME")
     if env:
         return Path(env).expanduser()
-    return Path.cwd() / DEFAULT_ROOT
+    cwd = Path.cwd()
+    for folder in (cwd, *cwd.parents):
+        candidate = folder / DEFAULT_ROOT
+        if candidate.is_dir():
+            return candidate
+    return cwd / DEFAULT_ROOT
 
 
 def _jsonable(value: Any) -> Any:
@@ -1039,7 +1045,7 @@ class Service:
             hint=(
                 "Доступно: presence, agents, who-knows, send, inbox, mark-read, "
                 "brief. Доски задач нет: ориентир — заметки в памяти "
-                "(projects/pilot/backlog.md)."
+                "(README.md и backlog.md)."
             ),
         )
 

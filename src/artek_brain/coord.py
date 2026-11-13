@@ -2,7 +2,7 @@
 
 Письма (inbox), присутствие агентов, «кто последним менял путь» и короткий
 бриф. Доски задач нет (решение владельца 12.11.2026): ориентир для агентов —
-заметки в памяти, прежде всего projects/pilot/backlog.md.
+заметки в памяти, прежде всего README.md и backlog.md в корне памяти.
 В модуле нет сети и вызовов LLM, все операции детерминированы.
 """
 
@@ -15,7 +15,8 @@ from typing import Any, Callable, Iterable, Sequence
 from .errors import ArtekBrainError, ValidationError
 from .store import Store
 
-BACKLOG_PATH = "projects/pilot/backlog.md"
+README_PATH = "README.md"
+BACKLOG_PATH = "backlog.md"
 """Заметка, которая заменяет доску задач."""
 
 _SCHEMA = """
@@ -430,7 +431,7 @@ class Coordination:
         if not isinstance(path, str) or not path.strip():
             raise ValidationError(
                 "path обязателен.",
-                hint="Передайте путь, например projects/pilot/README.md.",
+                hint="Передайте путь, например docs/architecture.md.",
             )
         clean = self._store._normalize_path(path)
         with self._lock:
@@ -499,7 +500,7 @@ class Coordination:
 
         lines: list[str] = [
             f"# Бриф для {name}",
-            f"Ориентир: {BACKLOG_PATH} и projects/pilot/README.md "
+            f"Ориентир: {README_PATH} и {BACKLOG_PATH} "
             "(доски задач нет).",
             f"Сейчас работают: {len(online)}",
         ]

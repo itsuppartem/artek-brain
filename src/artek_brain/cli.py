@@ -36,12 +36,16 @@ def _add_common(parser: argparse.ArgumentParser, *, top: bool = False) -> None:
     )
 
 
-def _token(args: argparse.Namespace) -> str | None:
-    return (
-        getattr(args, "token", None)
-        or os.environ.get("BRAIN_TOKEN")
-        or None
-    )
+def _token(args: argparse.Namespace, root: Path | None = None) -> str | None:
+    """Токен: --token, BRAIN_TOKEN или файл agent.token в хранилище."""
+    explicit = getattr(args, "token", None) or os.environ.get("BRAIN_TOKEN")
+    if explicit:
+        return explicit
+    if root is not None:
+        from .project import read_token_file
+
+        return read_token_file(root)
+    return None
 
 
 def _read_content(args: argparse.Namespace) -> str:
@@ -244,6 +248,10 @@ def _parser() -> argparse.ArgumentParser:
         item = sub.add_parser(name, help=help_text)
         _add_common(item)
         return item
+
+    setup = add("setup", "развернуть мозг в проекте: .brain, токены, .mcp.json, AGENTS.md")
+    setup.add_argument("project", nargs="?", default=".", help="Каталог проекта (по умолчанию текущий).")
+    setup.add_argument("--name", default=None, help="Название проекта для README памяти.")
 
     init = add("init", "инициализировать хранилище и выдать owner-токен")
     init.add_argument("--owner-name", default="owner", help="Имя owner-токена.")
@@ -640,7 +648,12 @@ def _sandbox_limits(args: argparse.Namespace) -> dict[str, Any] | None:
 def _run(args: argparse.Namespace) -> Any:
     root = resolve_root(getattr(args, "root", None))
     command = args.command
-    token = _token(args)
+    if command == "setup":
+        from .project import setup_project
+
+        return setup_project(args.project, name=args.name)
+
+    token = _token(args, root)
 
     if command == "serve":
         from .http_api import serve
