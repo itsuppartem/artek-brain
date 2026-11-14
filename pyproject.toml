@@ -1,7 +1,9 @@
 [project]
 name = "artek-brain"
 version = "0.1.0"
-description = "Общий слой памяти и инструментов для людей и агентов (без LLM в ядре)"
+description = "Shared, versioned memory for people and AI coding agents (MCP, CLI, HTTP); no LLM in the core"
+license = "MIT"
+authors = [{ name = "Artem Gulyaev", email = "serbianartek@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = []
 
