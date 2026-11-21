@@ -48,6 +48,37 @@ def _token(args: argparse.Namespace, root: Path | None = None) -> str | None:
     return None
 
 
+def _hook(args: argparse.Namespace, root: Path) -> None:
+    """Напечатать бриф памяти для хука SessionStart; никогда не падать.
+
+    Хук Claude Code кладёт stdout в контекст агента, в том числе после
+    сжатия контекста. Нет хранилища или токена — молча ничего не печатаем,
+    чтобы не мешать сессии.
+    """
+    try:
+        if not root.exists():
+            return
+        token = _token(args, root)
+        if not token:
+            return
+        service = Service(root)
+        try:
+            data = service.coord_action(token, "brief")
+        finally:
+            service.close()
+        text = data.get("brief") if isinstance(data, dict) else str(data)
+        if not text:
+            return
+        print(
+            "Память проекта (artek-brain, MCP-сервер brain). Бриф на сейчас:\n"
+            + text
+            + "\nДальше: brain_read нужных документов из брифа, "
+            "brain_search перед правкой незнакомой части."
+        )
+    except Exception:  # pragma: no cover - хук не должен ломать старт сессии
+        return
+
+
 def _read_content(args: argparse.Namespace) -> str:
     if getattr(args, "content", None) is not None:
         return args.content
@@ -80,6 +111,20 @@ def _print_text(command: str, data: Any) -> None:
                 f"просрочено review_by: {data.get('overdue', 0)} "
                 f"({data.get('freshness_overdue', 0):.2%})"
             )
+            print(
+                f"просрочено по сроку свежести (без review_by): "
+                f"{data.get('overdue_by_ttl', 0)}"
+            )
+            for path in data.get("overdue_by_ttl_paths", [])[:10]:
+                print(f"  - {path}")
+            print(
+                f"свежих: {data.get('fresh_ratio', 1.0):.0%} "
+                f"(по {data.get('freshness_source', 'review_by')})"
+            )
+            lagging = data.get("docs_lagging", [])
+            print(f"отстали от заметок: {len(lagging)}")
+            for item in lagging[:10]:
+                print(f"  - {item['path']} (+{item['notes_after']} заметок после правки)")
             print(f"stale: {data.get('stale', 0)}")
             print(f"открытая очередь ревью: {data.get('review_queue_open', 0)}")
             labels = (
@@ -252,6 +297,18 @@ def _parser() -> argparse.ArgumentParser:
     setup = add("setup", "развернуть мозг в проекте: .brain, токены, .mcp.json, AGENTS.md")
     setup.add_argument("project", nargs="?", default=".", help="Каталог проекта (по умолчанию текущий).")
     setup.add_argument("--name", default=None, help="Название проекта для README памяти.")
+
+    hook = add(
+        "hook",
+        "вывод для хуков агентов: бриф памяти на старте сессии и после сжатия",
+    )
+    hook.add_argument(
+        "event",
+        nargs="?",
+        default="session-start",
+        choices=["session-start"],
+        help="Событие хука (пока только session-start).",
+    )
 
     init = add("init", "инициализировать хранилище и выдать owner-токен")
     init.add_argument("--owner-name", default="owner", help="Имя owner-токена.")
@@ -652,6 +709,19 @@ def _run(args: argparse.Namespace) -> Any:
         from .project import setup_project
 
         return setup_project(args.project, name=args.name)
+
+    if command == "hook":
+        _hook(args, root)
+        return None
+
+    if command != "init" and not root.exists():
+        raise ArtekBrainError(
+            f"Хранилище памяти не найдено: {root}.",
+            hint=(
+                "Разверните мозг в проекте (brain setup <каталог>) или brain init, "
+                "либо укажите BRAIN_HOME / --root. Пустое хранилище само не создаётся."
+            ),
+        )
 
     token = _token(args, root)
 

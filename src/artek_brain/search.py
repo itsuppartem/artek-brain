@@ -98,11 +98,26 @@ def _parse_date(value: str | datetime | None, *, name: str) -> str | None:
     return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
-def _fts_query(query: str) -> str:
-    """Безопасно превратить запрос в FTS5-выражение «все слова»."""
+def _stem(term: str) -> str:
+    """Грубая основа слова для префиксного поиска: «выкатка» → «выкат»."""
+    if len(term) <= 5:
+        return term
+    return term[: max(4, len(term) - 2)]
+
+
+def _fts_query(query: str, match: str = "all") -> str:
+    """Безопасно превратить запрос в FTS5-выражение.
+
+    match="all" — все слова точно (по умолчанию);
+    match="any" — любое слово по основе с префиксом (запасной режим,
+    когда строгий запрос ничего не нашёл).
+    """
     terms = [term for term in query.split() if term.strip()]
     if not terms:
         return ""
+    if match == "any":
+        parts = ['"' + _stem(term).replace('"', '""') + '"*' for term in terms]
+        return " OR ".join(parts)
     return " AND ".join('"' + term.replace('"', '""') + '"' for term in terms)
 
 
@@ -175,6 +190,7 @@ class SearchPage:
     limit: int = 20
     offset: int = 0
     query: str = ""
+    relaxed: bool = False
 
     @property
     def has_more(self) -> bool:
@@ -190,6 +206,17 @@ class SearchPage:
             "offset": self.offset,
             "has_more": self.has_more,
             "query": self.query,
+            "match": "any" if self.relaxed else "all",
+            **(
+                {
+                    "note": (
+                        "Точного совпадения по всем словам нет; показаны "
+                        "документы с любым из слов (по основе)."
+                    )
+                }
+                if self.relaxed
+                else {}
+            ),
         }
 
 
@@ -826,32 +853,49 @@ class Search:
         columns = (
             "rowid, path, title, body, doc_type, status, tags, author, ts, version"
         )
-        with self._lock:
-            self._ensure_open()
-            if match:
-                sql = (
-                    f"SELECT {columns}, bm25(current_fts) AS rank, "
-                    "snippet(current_fts, 2, '[', ']', '…', 16) AS snip "
-                    "FROM current_fts WHERE current_fts MATCH ?"
-                )
-                args: list[Any] = [match, *params]
-                if clauses:
-                    sql += " AND " + " AND ".join(clauses)
-                sql += " ORDER BY rank ASC, path ASC"
-            else:
-                sql = f"SELECT {columns}, 0.0 AS rank, substr(body, 1, 240) AS snip FROM current_fts"
-                args = list(params)
-                if clauses:
-                    sql += " WHERE " + " AND ".join(clauses)
-                sql += " ORDER BY path ASC"
-            rows = self._conn.execute(sql, args).fetchall()
-        items = [self._row_to_item(row) for row in rows]
-        if can_read is not None:
-            items = [item for item in items if can_read(item.path)]
+        def run(expr: str) -> list[sqlite3.Row]:
+            with self._lock:
+                self._ensure_open()
+                if expr:
+                    sql = (
+                        f"SELECT {columns}, bm25(current_fts) AS rank, "
+                        "snippet(current_fts, 2, '[', ']', '…', 16) AS snip "
+                        "FROM current_fts WHERE current_fts MATCH ?"
+                    )
+                    args: list[Any] = [expr, *params]
+                    if clauses:
+                        sql += " AND " + " AND ".join(clauses)
+                    sql += " ORDER BY rank ASC, path ASC"
+                else:
+                    sql = f"SELECT {columns}, 0.0 AS rank, substr(body, 1, 240) AS snip FROM current_fts"
+                    args = list(params)
+                    if clauses:
+                        sql += " WHERE " + " AND ".join(clauses)
+                    sql += " ORDER BY path ASC"
+                return self._conn.execute(sql, args).fetchall()
+
+        def readable(rows: list[sqlite3.Row]) -> list[SearchItem]:
+            found = [self._row_to_item(row) for row in rows]
+            if can_read is not None:
+                found = [item for item in found if can_read(item.path)]
+            return found
+
+        items = readable(run(match))
+        relaxed = False
+        if match and not items:
+            loose = _fts_query(query.strip(), "any")
+            if loose and loose != match:
+                items = readable(run(loose))
+                relaxed = bool(items)
         total = len(items)
         page = items[offset : offset + limit]
         return SearchPage(
-            items=page, total=total, limit=limit, offset=offset, query=query
+            items=page,
+            total=total,
+            limit=limit,
+            offset=offset,
+            query=query,
+            relaxed=relaxed,
         )
 
     def search_history(

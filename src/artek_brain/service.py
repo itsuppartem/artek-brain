@@ -16,7 +16,7 @@ from .access import Access, IssuedToken, Principal
 from .anomaly import AnomalyConfig, AnomalyDetector
 from .brain import Brain
 from .coord import Coordination
-from .errors import PermissionDenied, ValidationError
+from .errors import ArtekBrainError, PermissionDenied, ValidationError
 from .proposals import ProposalStore
 from .quota import Quota
 from .review_queue import ReviewQueue
@@ -354,6 +354,7 @@ class Service:
             session=session,
             model=model,
         )
+        self.store.checkpoint_passive()
         return _jsonable(result)
 
     def overwrite(
@@ -584,8 +585,14 @@ class Service:
         offset: int = 0,
         history: bool = False,
         mode: str = "fts",
+        session: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
-        """Поиск по текущим версиям (fts/semantic/hybrid) или истории."""
+        """Поиск по текущим версиям (fts/semantic/hybrid) или истории.
+
+        Успешный поиск пишется в журнал аудита (action=search): запрос,
+        режим и число найденного — так видно, что агенты ищут и не находят.
+        """
         mode = str(mode or "fts").strip().lower()
         if history and mode != "fts":
             raise ValidationError(
@@ -620,6 +627,23 @@ class Service:
         data = _jsonable(page)
         if warning:
             data["warning"] = warning
+        try:
+            actor = self.brain.access.verify(token or "").name
+        except ArtekBrainError:  # pragma: no cover - токен уже проверен поиском
+            actor = None
+        self.store._audit_ok(
+            actor,
+            "search_history" if history else "search",
+            path_prefix,
+            {
+                "query": str(query)[:200],
+                "mode": mode,
+                "hits": int(data.get("total", 0) or 0),
+                "match": data.get("match", "all"),
+            },
+            session,
+            model,
+        )
         return data
 
     # ------------------------------------------------------------------
