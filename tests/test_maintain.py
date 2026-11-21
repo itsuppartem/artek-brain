@@ -51,6 +51,10 @@ def test_maintain_tolerates_busy_database(tmp_path: Path) -> None:
         service.write(agent, "docs/a.md", "# A\n\nтекст\n", "создал")
         reader.execute("BEGIN")
         reader.execute("SELECT COUNT(*) FROM versions").fetchone()
+        # Запись после снимка читателя: эти кадры WAL нельзя перенести,
+        # пока читатель держит снимок (после каждой записи идёт PASSIVE
+        # checkpoint, поэтому без второй записи WAL уже пуст).
+        service.write(agent, "docs/b.md", "# B\n\nещё\n", "вторая запись")
         report = service.maintain(owner)
         brain = next(
             item

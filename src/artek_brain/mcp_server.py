@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import sys
+import uuid
 from typing import Any, Callable
 
 from .errors import ArtekBrainError, ValidationError
@@ -409,6 +411,25 @@ class BrainMCP:
         self.service = service
         self.token = token
         self.max_response_chars = int(max_response_chars)
+        # Кто работает с памятью: попадает в журнал аудита каждой операции.
+        self.session = os.environ.get("BRAIN_SESSION") or uuid.uuid4().hex[:12]
+        self.model = os.environ.get("BRAIN_MODEL") or None
+        self.client = os.environ.get("BRAIN_CLIENT") or None
+
+    def set_client(self, name: str | None, version: str | None = None) -> None:
+        """Запомнить клиента MCP из initialize, если он не задан окружением."""
+        if self.client or not name:
+            return
+        self.client = f"{name}/{version}" if version else str(name)
+
+    @property
+    def model_label(self) -> str | None:
+        """Подпись для поля model журнала: модель и клиент, что известно."""
+        parts = [part for part in (self.model, self.client) if part]
+        return " · ".join(parts) if parts else None
+
+    def _who(self) -> dict[str, Any]:
+        return {"session": self.session, "model": self.model_label}
 
     # ------------------------------------------------------------------
     # Каталог и справка
@@ -424,6 +445,9 @@ class BrainMCP:
         if not raw:
             lines = [
                 "# Artek Brain: справка",
+                "",
+                "Начни с brain_op(action=\"brief\"): ориентиры, что устарело, "
+                "что недавно менялось. Итог работы — заметка в notes/ и правка docs/.",
                 "",
                 "Стартовые инструменты (progressive disclosure):",
                 "- brain_help(topic) — эта справка;",
@@ -491,12 +515,62 @@ class BrainMCP:
     # Прямые инструменты
     # ------------------------------------------------------------------
     def read(self, path: str, **params: Any) -> dict[str, Any]:
-        """Прочитать документ."""
+        """Прочитать документ; длинный режется по строкам с оглавлением хвоста."""
         cursor = params.pop("cursor", None)
-        data = self.service.read(self.token, path, **params)
+        data = self.service.read(self.token, path, **params, **self._who())
         if cursor:
             data["cursor_hint"] = cursor
-        return data
+        return self._fit_read(data, params.get("line_start"))
+
+    def _fit_read(self, data: dict[str, Any], line_start: Any) -> dict[str, Any]:
+        """Уложить чтение в лимит ответа целыми строками.
+
+        Вместо обрезки JSON по курсору агент получает начало документа,
+        список непоказанных разделов с номерами строк и готовый следующий
+        вызов. Так недочитанный хвост виден явно.
+        """
+        content = data.get("content")
+        if not isinstance(content, str) or len(_json(data)) <= self.max_response_chars:
+            return data
+        try:
+            first = max(1, int(line_start)) if line_start not in (None, "") else 1
+        except (TypeError, ValueError):
+            first = 1
+        lines = content.splitlines(keepends=True)
+        budget = max(200, self.max_response_chars - 1800)
+        kept: list[str] = []
+        size = 0
+        for line in lines:
+            if kept and size + len(line) > budget:
+                break
+            kept.append(line[:budget] if not kept else line)
+            size += len(kept[-1])
+        shown = len(kept)
+        rest = [
+            {"line": first + index, "title": line.strip().lstrip("#").strip()}
+            for index, line in enumerate(lines[shown:], start=shown)
+            if line.startswith("#")
+        ]
+        out = dict(data)
+        out["content"] = "".join(kept)
+        out["truncated"] = True
+        out["shown_lines"] = f"{first}-{first + shown - 1}"
+        out["total_lines"] = first + len(lines) - 1
+        out["next"] = {"path": data.get("path"), "line_start": first + shown}
+        out["note"] = (
+            "Документ показан не целиком. Непоказанные разделы — в "
+            "remaining_sections; дочитай brain_read(path, line_start=...) "
+            "или brain_read(path, section=\"<заголовок>\")."
+        )
+        out["remaining_sections"] = rest
+        while rest and len(_json(out)) > self.max_response_chars:
+            rest = rest[: len(rest) // 2]
+            out["remaining_sections"] = rest + [{"line": None, "title": "…"}]
+        if len(_json(out)) > self.max_response_chars:
+            # Лимит слишком мал даже для одной строки с оглавлением:
+            # остаётся общий механизм курсора.
+            return data
+        return out
 
     def write(
         self,
@@ -507,12 +581,16 @@ class BrainMCP:
     ) -> dict[str, Any]:
         """Записать новую версию."""
         params.pop("cursor", None)
-        return self.service.write(self.token, path, content, reason, **params)
+        return self.service.write(
+            self.token, path, content, reason, **params, **self._who()
+        )
 
     def search(self, query: str, **params: Any) -> dict[str, Any]:
         """Поиск по памяти."""
         params.pop("cursor", None)
-        return self.service.search(self.token, query, **params)
+        if "type" in params:
+            params["doc_type"] = params.pop("type")
+        return self.service.search(self.token, query, **params, **self._who())
 
     def ls(
         self,
@@ -539,6 +617,9 @@ class BrainMCP:
     def _invoke(self, method: Callable[..., Any], params: dict[str, Any]) -> Any:
         """Вызвать метод Service, отбросив лишние kwargs."""
         signature = inspect.signature(method)
+        for name, value in self._who().items():
+            if name in signature.parameters and params.get(name) is None:
+                params = {**params, name: value}
         if any(
             item.kind is inspect.Parameter.VAR_KEYWORD
             for item in signature.parameters.values()
@@ -662,6 +743,10 @@ def run_stdio(
         )
 
     async def on_call_tool(context: Any, params: Any) -> Any:
+        if app.client is None:
+            info = _client_info(context)
+            if info:
+                app.set_client(*info)
         text, is_error = app.call(params.name, dict(params.arguments or {}))
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=text)],
@@ -670,7 +755,7 @@ def run_stdio(
 
     server = Server(
         "artek-brain",
-        version="0.1.0",
+        version="0.2.0",
         instructions=app.help(),
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
@@ -685,6 +770,22 @@ def run_stdio(
             )
 
     asyncio.run(main())
+
+
+def _client_info(context: Any) -> tuple[str, str | None] | None:
+    """Достать имя и версию клиента из контекста запроса MCP (без падений)."""
+    try:
+        session = getattr(context, "session", None)
+        client_params = getattr(session, "client_params", None)
+        info = getattr(client_params, "client_info", None) or getattr(
+            client_params, "clientInfo", None
+        )
+        name = getattr(info, "name", None)
+        if not name:
+            return None
+        return str(name), getattr(info, "version", None)
+    except Exception:  # pragma: no cover - зависит от версии пакета mcp
+        return None
 
 
 def _run_fallback(app: BrainMCP) -> None:  # pragma: no cover - резервный путь
@@ -703,10 +804,12 @@ def _run_fallback(app: BrainMCP) -> None:  # pragma: no cover - резервны
         if request_id is None:
             continue
         if method == "initialize":
+            info = params.get("clientInfo") or {}
+            app.set_client(info.get("name"), info.get("version"))
             result: Any = {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "artek-brain", "version": "0.1.0"},
+                "serverInfo": {"name": "artek-brain", "version": "0.2.0"},
             }
         elif method == "tools/list":
             result = {"tools": app.list_tools()}

@@ -94,7 +94,7 @@ from .store import (
 )
 from .coord import CoordError, Coordination, Message, Presence, WhoKnows
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
