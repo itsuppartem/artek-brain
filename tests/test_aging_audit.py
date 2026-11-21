@@ -209,6 +209,7 @@ def test_cli_refuses_missing_root_and_hook_is_silent(tmp_path: Path, capsys) -> 
 
 
 def test_setup_upgrades_rules_clients_and_hook(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
     project = tmp_path / "shop"
     project.mkdir()
     (project / "AGENTS.md").write_text(
@@ -247,3 +248,19 @@ def test_setup_upgrades_rules_clients_and_hook(tmp_path: Path, capsys, monkeypat
     assert main(["hook", "session-start"]) == 0
     out = capsys.readouterr().out
     assert "Бриф" in out and "README.md" in out
+
+
+def test_setup_skips_project_hook_when_user_hook_exists(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "claude-home"
+    home.mkdir()
+    (home / "settings.json").write_text(
+        json.dumps({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "brain hook session-start"}]}]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    project = tmp_path / "shop"
+    project.mkdir()
+    result = setup_project(project)
+    assert ".claude/settings.json" not in result["created"]
+    assert not (project / ".claude" / "settings.json").exists()

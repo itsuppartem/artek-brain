@@ -53,7 +53,7 @@ uv tool install --from git+https://github.com/itsuppartem/artek-brain "artek-bra
 cd /path/to/project && brain setup --name "My project"
 ```
 
-`brain setup` creates `.brain/` (database plus `owner.token` and `agent.token`, mode 600, git-ignored), `.mcp.json` for Claude Code, `opencode.json` for opencode agents (each tagged with its own `BRAIN_CLIENT` for the audit log), a rules block in `AGENTS.md` and a `SessionStart` hook in `.claude/settings.json`. Re-running it is safe and upgrades the rules block in place. Other commands never create an empty store silently. The MCP server looks for `.brain` up the directory tree, so agent worktrees inside the project share the same memory.
+`brain setup` creates `.brain/` (database plus `owner.token` and `agent.token`, mode 600, git-ignored), `.mcp.json` for Claude Code, `opencode.json` for opencode agents (each tagged with its own `BRAIN_CLIENT` for the audit log), a rules block in `AGENTS.md` and a `SessionStart` hook in `.claude/settings.json` (skipped if the hook is already in your user-level `~/.claude/settings.json`, which also covers git worktrees). Re-running it is safe and upgrades the rules block in place. Other commands never create an empty store silently. The MCP server looks for `.brain` up the directory tree, so agent worktrees inside the project share the same memory.
 
 ## Performance
 

@@ -161,8 +161,20 @@ def _ensure_claude_hook(project: Path, command: list[str]) -> bool:
     """Хук Claude Code: бриф памяти в контекст на старте и после сжатия.
 
     Пишет .claude/settings.json проекта (SessionStart, matcher
-    startup|resume|clear|compact). Существующие хуки не трогаются.
+    startup|resume|clear|compact). Существующие хуки не трогаются. Если
+    такой хук уже есть в пользовательском ~/.claude/settings.json,
+    проектный не ставится.
     """
+    user_settings = Path(
+        os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
+    ) / "settings.json"
+    try:
+        if "hook session-start" in user_settings.read_text(encoding="utf-8"):
+            # Хук уже стоит у пользователя и работает во всех проектах и
+            # git-копиях; второй дал бы бриф дважды.
+            return False
+    except OSError:
+        pass
     path = project / ".claude" / "settings.json"
     data: dict[str, Any] = {}
     if path.exists():
