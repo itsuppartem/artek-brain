@@ -152,6 +152,19 @@ def _number_parts(value: str) -> tuple[str, str] | None:
     return canonical, unit
 
 
+def _is_scalar_value(value: str) -> bool:
+    """Строка «ключ: значение» — это числовой факт, а не фраза с числом внутри.
+
+    «Порог: 50 000 RSD» — факт; «сервер `ruvds-sws36`, папка …» — нет:
+    число должно стоять в начале короткого значения, а не внутри имени.
+    """
+    text = value.strip().strip("`*_").lstrip("~≈ ")
+    if not text or len(text) > 60:
+        return False
+    match = _NUMBER_RE.match(text)
+    return match is not None
+
+
 def _display_number(canonical: str) -> str:
     """Показать число без внутреннего префикса normalize_value."""
     return canonical[4:] if canonical.startswith("num:") else canonical
@@ -236,7 +249,7 @@ def _table_values(doc: Document) -> list[_TableValue]:
         match = _KEY_VALUE_RE.match(lines[index])
         if match:
             key, value = match.group(1).strip(), match.group(2).strip()
-            parsed = _number_parts(value)
+            parsed = _number_parts(value) if _is_scalar_value(value) else None
             if len(key) >= 2 and parsed is not None:
                 values.append(
                     _TableValue(
@@ -609,6 +622,30 @@ class Quality:
             and moment < now_utc()
         )
         overdue = len(overdue_paths)
+        from .aging import freshness, lagging_docs
+
+        ttl_items = [
+            item
+            for item in freshness(self.brain.store)
+            if item["path"] in {doc.path for doc in docs}
+        ]
+        no_review = {doc.path for doc in docs if not doc.data.get("review_by")}
+        ttl_overdue_paths = sorted(
+            item["path"]
+            for item in ttl_items
+            if item["overdue"] and item["path"] in no_review
+        )
+        lagging = [
+            {"path": item["path"], "notes_after": item["notes_after"]}
+            for item in lagging_docs(ttl_items)
+        ]
+        # Свежим считаем документ без просрочки и без накопившихся после
+        # него заметок: иначе 0 review_by даёт ложные «100% свежести».
+        effective_overdue = len(
+            set(overdue_paths)
+            | set(ttl_overdue_paths)
+            | {item["path"] for item in lagging}
+        )
         stale_paths = sorted(doc.path for doc in docs if doc.status == "stale")
         queue_open = ReviewQueue(
             self.brain.store, getattr(self.brain, "access", None)
@@ -621,7 +658,15 @@ class Quality:
             "overdue": overdue,
             "freshness": (overdue / total) if total else 0.0,
             "freshness_overdue": (overdue / total) if total else 0.0,
-            "fresh_ratio": (1.0 - overdue / total) if total else 1.0,
+            "fresh_ratio": (1.0 - effective_overdue / total) if total else 1.0,
+            "freshness_source": (
+                "review_by"
+                if not no_review
+                else ("ttl" if with_review_by == 0 else "review_by+ttl")
+            ),
+            "overdue_by_ttl": len(ttl_overdue_paths),
+            "overdue_by_ttl_paths": ttl_overdue_paths,
+            "docs_lagging": lagging,
             "stale": len(stale_paths),
             "stale_paths": stale_paths,
             "review_queue_open": queue_open,

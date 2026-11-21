@@ -190,8 +190,32 @@ class Coordination:
                 conn.execute(f"DROP TABLE {old}")
         for name in _LEGACY_DROPS:
             if name in existing:
+                self._export_legacy(name)
                 conn.execute(f"DROP TABLE {name}")
         conn.execute("DROP INDEX IF EXISTS idx_task_messages_recipient")
+
+    def _export_legacy(self, table: str) -> None:
+        """Сохранить строки старой таблицы в JSON перед удалением.
+
+        Удаление доски задач не должно молча терять данные, если старый
+        процесс успел что-то записать: строки ложатся в .brain/legacy/.
+        """
+        import json
+
+        conn = self._store._conn
+        rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+        if not rows:
+            return
+        folder = self._store.root / "legacy"
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = _utc_now().strftime("%Y%m%dT%H%M%S%f")
+        target = folder / f"{table}-{stamp}.json"
+        payload = [dict(zip(row.keys(), tuple(row))) for row in rows]
+        target.write_text(
+            json.dumps(payload, ensure_ascii=False, default=str, indent=1),
+            encoding="utf-8",
+        )
+        target.chmod(0o600)
 
     def _merge_legacy(self, old: str, new: str) -> None:
         conn = self._store._conn
@@ -463,7 +487,7 @@ class Coordination:
             reason=row["reason"],
         )
 
-    def brief(self, agent_name: str, *, limit: int = 2000) -> str:
+    def brief(self, agent_name: str, *, limit: int = 3000) -> str:
         """Короткий детерминированный бриф для нового агента.
 
         Где ориентир, кто сейчас работает, последние правки памяти и
@@ -498,12 +522,57 @@ class Coordination:
             text = value or ""
             return text if len(text) <= width else text[: width - 1] + "…"
 
+        from .aging import freshness, lagging_docs, load_aging
+
+        aging = load_aging(self._store.root)
+        try:
+            fresh = freshness(self._store)
+        except Exception:  # pragma: no cover - бриф не должен падать из-за метрик
+            fresh = []
+        existing = {item["path"] for item in fresh}
+        anchors = [path for path in aging.brief_paths if path in existing]
         lines: list[str] = [
             f"# Бриф для {name}",
-            f"Ориентир: {README_PATH} и {BACKLOG_PATH} "
-            "(доски задач нет).",
-            f"Сейчас работают: {len(online)}",
+            "Ориентир: "
+            + (", ".join(anchors) if anchors else "README.md и backlog.md не найдены")
+            + " (доски задач нет).",
         ]
+        overdue = [item for item in fresh if item["overdue"]]
+        lagging = {item["path"] for item in lagging_docs(fresh)}
+        if overdue:
+            lines.append(
+                f"Проверь перед опорой — просрочено по сроку свежести: {len(overdue)}"
+            )
+            for item in overdue[:6]:
+                tail = (
+                    f", после неё {item['notes_after']} заметок"
+                    if item["path"] in lagging
+                    else ""
+                )
+                lines.append(
+                    f"- {item['path']} — правка {item['age_days']:.0f} дн. назад "
+                    f"(срок {item['ttl_days']}){tail}"
+                )
+            lines.append(
+                "Факты из них сверяй с кодом/сервером; нашёл расхождение — "
+                "обнови документ (brain_write с base_version), а не только notes/."
+            )
+        behind = [
+            item
+            for item in sorted(
+                lagging_docs(fresh), key=lambda item: (-item["reads"], item["path"])
+            )
+            if not item["overdue"]
+        ]
+        if behind:
+            lines.append(
+                "Отстали от заметок (после последней правки появились notes/): "
+                + ", ".join(
+                    f"{item['path']} (+{item['notes_after']})" for item in behind[:5]
+                )
+                + (f" и ещё {len(behind) - 5}" if len(behind) > 5 else "")
+            )
+        lines.append(f"Сейчас работают: {len(online)}")
         for item in online[:6]:
             lines.append(f"- {item.name}: {clip(item.activity, 60) or '—'}")
         lines.append("Последние правки памяти:")
