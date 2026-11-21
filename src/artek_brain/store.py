@@ -39,6 +39,23 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _DAY = timedelta(days=1)
 
+# Версия схемы (PRAGMA user_version). 1 — схема без доски задач (12.11.2026).
+# Новая несовместимая правка схемы увеличивает номер; старый код такое
+# хранилище не откроет и не испортит.
+SCHEMA_VERSION = 1
+
+
+def _restrict_files(db_path: Path) -> None:
+    """Права 600 на файлы базы: память проекта читает только владелец."""
+    for suffix in ("", "-wal", "-shm"):
+        target = Path(str(db_path) + suffix)
+        try:
+            if target.exists():
+                target.chmod(0o600)
+        except OSError:
+            continue
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
     path TEXT PRIMARY KEY,
@@ -510,8 +527,22 @@ class Store:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=30000")
+        # WAL после контрольной точки обрезается до 1 МБ, а не держит пик.
+        self._conn.execute("PRAGMA journal_size_limit=1048576")
+        found_version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        if found_version > SCHEMA_VERSION:
+            self._conn.close()
+            self._closed = True
+            raise ValidationError(
+                f"Хранилище {self.root} создано более новой версией artek-brain "
+                f"(схема {found_version}, эта версия знает до {SCHEMA_VERSION}).",
+                hint="Обновите artek-brain до свежей версии, прежде чем открывать хранилище.",
+            )
         with self._conn:
             self._conn.executescript(_SCHEMA)
+            if found_version < SCHEMA_VERSION:
+                self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        _restrict_files(self.db_path)
         self.storage = DeltaStorage(
             self._conn,
             self.blobs_dir,
@@ -535,6 +566,16 @@ class Store:
             self.close()
         except Exception:
             pass
+
+    def checkpoint_passive(self) -> None:
+        """Перенести WAL в базу, не дожидаясь читателей (не блокирует)."""
+        with self._lock:
+            if self._closed:
+                return
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except sqlite3.Error:
+                return
 
     def close(self) -> None:
         """Закрыть соединение с базой (повторный вызов безопасен)."""

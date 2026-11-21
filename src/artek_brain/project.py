@@ -2,8 +2,11 @@
 
 Один экземпляр на проект: хранилище в <проект>/.brain, токены в файлах
 .brain/owner.token и .brain/agent.token (права 600), .mcp.json для
-Claude Code, opencode.json для агентов opencode, правила в AGENTS.md.\nMCP ищет .brain вверх от текущего каталога, поэтому git-копии агентов\nвнутри проекта пишут в ту же память. Повторный запуск безопасен:
-ничего существующего не перезаписывается.
+Claude Code, opencode.json для агентов opencode, правила в AGENTS.md,
+хук брифа в .claude/settings.json. MCP ищет .brain вверх от текущего
+каталога, поэтому git-копии агентов внутри проекта пишут в ту же память.
+Повторный запуск безопасен: данные не перезаписываются, обновляются только блок правил в AGENTS.md между
+маркерами и метки клиентов BRAIN_CLIENT; добавляется хук брифа.
 """
 
 from __future__ import annotations
@@ -50,11 +53,20 @@ _BACKLOG = """# Бэклог «{name}»
 
 _AGENTS_BLOCK = """{begin}
 ## Память проекта (artek-brain)
-У проекта есть общая память: MCP-сервер `brain`.
-- В начале работы: `brain_read("README.md")` и `brain_read("backlog.md")`.
-- Перед изменением незнакомой части ищи: `brain_search("...")`.
-- Итог работы, решения и найденные грабли записывай: `brain_write` в
-  `notes/` или `docs/` с понятной причиной (reason).
+У проекта есть общая память: MCP-сервер `brain`. Она общая для всех сессий,
+субагентов и агентов opencode: что не записано в мозг, следующий агент не узнает.
+- В начале работы и после сжатия контекста: `brain_op(action="brief")` —
+  ориентиры, что устарело и что недавно менялось (хук может подложить его сам).
+  Потом `brain_read` нужных документов (`README.md`, `backlog.md` и т. п.).
+- Перед правкой незнакомой части ищи: `brain_search("одно-два слова")`.
+- Ответ обрезан (`truncated`, `remaining_sections`) — дочитай по `next.line_start`
+  или `section`, прежде чем опираться на документ.
+- Документ помечен в брифе как устаревший — сверь факты с кодом и сервером.
+- Итог работы: заметка в `notes/` и правка справочного документа в `docs/`
+  (или `backlog.md`), если поменялись факты, решения или грабли. Только заметка —
+  это половина работы: docs остаются старыми.
+- Даёшь задачу субагенту или другой сессии — пиши в промпте: «сначала
+  `brain_op(action="brief")`, итог — в мозг».
 - `README.md`, `rules/`, `approved/`, `owner/` меняет только владелец;
   предложения клади в `owner/inbox/<имя>.md`.
 - Секреты в память не пиши: запись с ключом будет отклонена.
@@ -106,11 +118,17 @@ def _ensure_mcp(project: Path, command: list[str]) -> bool:
         data = json.loads(path.read_text(encoding="utf-8") or "{}")
     servers = data.setdefault("mcpServers", {})
     if MCP_SERVER_NAME in servers:
-        return False
-    servers[MCP_SERVER_NAME] = {
-        "command": command[0],
-        "args": [*command[1:], "mcp"],
-    }
+        entry = servers[MCP_SERVER_NAME]
+        env = entry.setdefault("env", {}) if isinstance(entry, dict) else None
+        if env is None or env.get("BRAIN_CLIENT"):
+            return False
+        env["BRAIN_CLIENT"] = "claude-code"
+    else:
+        servers[MCP_SERVER_NAME] = {
+            "command": command[0],
+            "args": [*command[1:], "mcp"],
+            "env": {"BRAIN_CLIENT": "claude-code"},
+        }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return True
 
@@ -123,22 +141,86 @@ def _ensure_opencode(project: Path, command: list[str]) -> bool:
         data = json.loads(path.read_text(encoding="utf-8") or "{}")
     servers = data.setdefault("mcp", {})
     if MCP_SERVER_NAME in servers:
-        return False
-    servers[MCP_SERVER_NAME] = {
-        "type": "local",
-        "command": [*command, "mcp"],
-        "enabled": True,
-    }
+        entry = servers[MCP_SERVER_NAME]
+        env = entry.setdefault("environment", {}) if isinstance(entry, dict) else None
+        if env is None or env.get("BRAIN_CLIENT"):
+            return False
+        env["BRAIN_CLIENT"] = "opencode"
+    else:
+        servers[MCP_SERVER_NAME] = {
+            "type": "local",
+            "command": [*command, "mcp"],
+            "enabled": True,
+            "environment": {"BRAIN_CLIENT": "opencode"},
+        }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return True
 
 
+def _ensure_claude_hook(project: Path, command: list[str]) -> bool:
+    """Хук Claude Code: бриф памяти в контекст на старте и после сжатия.
+
+    Пишет .claude/settings.json проекта (SessionStart, matcher
+    startup|resume|clear|compact). Существующие хуки не трогаются. Если
+    такой хук уже есть в пользовательском ~/.claude/settings.json,
+    проектный не ставится.
+    """
+    user_settings = Path(
+        os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
+    ) / "settings.json"
+    try:
+        if "hook session-start" in user_settings.read_text(encoding="utf-8"):
+            # Хук уже стоит у пользователя и работает во всех проектах и
+            # git-копиях; второй дал бы бриф дважды.
+            return False
+    except OSError:
+        pass
+    path = project / ".claude" / "settings.json"
+    data: dict[str, Any] = {}
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    hook_command = " ".join([*(_quote(part) for part in command), "hook", "session-start"])
+    hooks = data.setdefault("hooks", {})
+    groups = hooks.setdefault("SessionStart", [])
+    for group in groups:
+        for item in group.get("hooks", []) if isinstance(group, dict) else []:
+            if "hook session-start" in str(item.get("command", "")):
+                return False
+    groups.append(
+        {
+            "matcher": "startup|resume|clear|compact",
+            "hooks": [{"type": "command", "command": hook_command, "timeout": 15}],
+        }
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+def _quote(part: str) -> str:
+    import shlex
+
+    return shlex.quote(part)
+
+
 def _ensure_agents(project: Path) -> bool:
+    """Дописать блок правил в AGENTS.md или обновить его между маркерами.
+
+    Текст вне маркеров не трогается.
+    """
     path = project / "AGENTS.md"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if MARK_BEGIN in text:
-        return False
     block = _AGENTS_BLOCK.format(begin=MARK_BEGIN, end=MARK_END)
+    if MARK_BEGIN in text and MARK_END in text:
+        start = text.index(MARK_BEGIN)
+        end = text.index(MARK_END, start) + len(MARK_END)
+        if text[end : end + 1] == "\n":
+            end += 1
+        updated = text[:start] + block + text[end:]
+        if updated == text:
+            return False
+        path.write_text(updated, encoding="utf-8")
+        return True
     if text and not text.endswith("\n"):
         text += "\n"
     path.write_text(text + ("\n" if text else "") + block, encoding="utf-8")
@@ -196,6 +278,8 @@ def setup_project(project: str | Path, name: str | None = None) -> dict[str, Any
         created.append(".mcp.json")
     if _ensure_opencode(project, command):
         created.append("opencode.json")
+    if _ensure_claude_hook(project, command):
+        created.append(".claude/settings.json")
     if _ensure_agents(project):
         created.append("AGENTS.md")
     return {
