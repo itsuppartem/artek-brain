@@ -631,19 +631,23 @@ class Service:
             actor = self.brain.access.verify(token or "").name
         except ArtekBrainError:  # pragma: no cover - токен уже проверен поиском
             actor = None
-        self.store._audit_ok(
-            actor,
-            "search_history" if history else "search",
-            path_prefix,
-            {
-                "query": str(query)[:200],
-                "mode": mode,
-                "hits": int(data.get("total", 0) or 0),
-                "match": data.get("match", "all"),
-            },
-            session,
-            model,
-        )
+        # Запись в журнал — в своей короткой транзакции с коммитом: без
+        # with-блока sqlite3 оставляет транзакцию открытой, и процесс держит
+        # блокировку записи (database is locked у всех остальных).
+        with self.store._lock, self.store._conn:
+            self.store._audit_ok(
+                actor,
+                "search_history" if history else "search",
+                path_prefix,
+                {
+                    "query": str(query)[:200],
+                    "mode": mode,
+                    "hits": int(data.get("total", 0) or 0),
+                    "match": data.get("match", "all"),
+                },
+                session,
+                model,
+            )
         return data
 
     # ------------------------------------------------------------------

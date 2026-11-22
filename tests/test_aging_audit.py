@@ -264,3 +264,21 @@ def test_setup_skips_project_hook_when_user_hook_exists(tmp_path: Path, monkeypa
     result = setup_project(project)
     assert ".claude/settings.json" not in result["created"]
     assert not (project / ".claude" / "settings.json").exists()
+
+
+def test_search_audit_does_not_hold_write_lock(tmp_path: Path) -> None:
+    """После поиска другой процесс должен сразу получить блокировку записи."""
+    service, _, agent = _service(tmp_path)
+    try:
+        service.write(agent, "docs/a.md", "# A\n\nтекст\n", "старт")
+        service.search(agent, "текст")
+        service.search(agent, "нет такого слова", history=True)
+        assert not service.store._conn.in_transaction
+        other = sqlite3.connect(str(service.root / "brain.sqlite3"), timeout=0.2)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("ROLLBACK")
+        finally:
+            other.close()
+    finally:
+        service.close()
