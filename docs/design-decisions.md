@@ -78,7 +78,7 @@ Short records of the main decisions: what was decided, what the alternative was,
 
 **Alternatives.** One central instance per team (the original default in TZ §0); a store per working directory.
 
-**Why.** The original specification describes one instance for a team or swarm. Before the switch, a shared instance kept projects apart by a path convention (the brief pointed agents at `projects/<name>/backlog.md`). Commit `d6fc34e` (13.11.2026) replaced that with one store per project, made the brief point at the root `README.md` and `backlog.md`, and let the CLI and MCP pick up `.brain/agent.token` without configuration. Walking up the tree is what makes it work with agents: Claude Code subagents and parallel sessions run in git worktrees and subfolders, and they all find the project's `.brain` without configuration. Refusing to create an empty store prevents the failure where an agent in the wrong directory writes into a fresh, invisible store.
+**Why.** The original specification describes one instance for a team or swarm. Before the switch, a shared instance kept projects apart by a path convention (the brief pointed agents at `projects/<name>/backlog.md`). Commit `967c656` (13.11.2026) replaced that with one store per project, made the brief point at the root `README.md` and `backlog.md`, and let the CLI and MCP pick up `.brain/agent.token` without configuration. Walking up the tree is what makes it work with agents: Claude Code subagents and parallel sessions run in git worktrees and subfolders, and they all find the project's `.brain` without configuration. Refusing to create an empty store prevents the failure where an agent in the wrong directory writes into a fresh, invisible store.
 
 **Cost.** Knowledge shared between projects has to be copied or kept in one of them. Worktrees created outside the project tree need `BRAIN_HOME`.
 
@@ -106,7 +106,7 @@ Short records of the main decisions: what was decided, what the alternative was,
 
 ## Removing the task board
 
-**Decision.** On 2026-11-12 the task board was removed from the memory (commit `8237cdb`). Inbox, presence, `who_knows` and the brief stayed, moved to `coord.py`. Agents orient themselves by notes in memory, primarily `README.md` and `backlog.md`.
+**Decision.** On 2026-11-12 the task board was removed from the memory (commit `ab62c8e`). Inbox, presence, `who_knows` and the brief stayed, moved to `coord.py`. Agents orient themselves by notes in memory, primarily `README.md` and `backlog.md`.
 
 **What was removed.** `tasks.py` (1827 lines: tasks with ids, priorities and dependencies; claims with leases, heartbeats and area-overlap protection; optimistic revisions; review, acceptance and rework; handoffs), `evidence.py` (498 lines, typed evidence checked against the audit log) and `runs.py` (585 lines, server-side test runs). The MCP tool `brain_task` became `brain_op`; the CLI `task` and `run` commands became `coord`; HTTP `/tasks` became `/agents`. Old stores are migrated on open: messages and presence are kept, task tables are dropped and their rows saved to `.brain/legacy/*.json`.
 

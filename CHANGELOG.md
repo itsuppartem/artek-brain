@@ -88,6 +88,6 @@ First version. Built from the specification in `docs/TZ.md`, stage by stage (`no
 
 - The task board (tasks, claims with leases, reviews, handoffs, evidence checks, server-side runs) was built during 0.1.0 development and removed on 2026-11-12 before the version was finished; see [docs/design-decisions.md](docs/design-decisions.md#removing-the-task-board).
 
-[0.2.1]: https://github.com/itsuppartem/artek-brain/compare/3aadd7a...main
-[0.2.0]: https://github.com/itsuppartem/artek-brain/compare/550d5b7...3aadd7a
-[0.1.0]: https://github.com/itsuppartem/artek-brain/commits/550d5b7
+[0.2.1]: https://github.com/itsuppartem/artek-brain/compare/d254dc8...main
+[0.2.0]: https://github.com/itsuppartem/artek-brain/compare/29f26f7...d254dc8
+[0.1.0]: https://github.com/itsuppartem/artek-brain/commits/29f26f7
