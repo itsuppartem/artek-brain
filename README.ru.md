@@ -22,9 +22,17 @@ cd /путь/к/проекту && brain setup --name "Название"
 
 Обновить уже установленный инструмент: `uv tool upgrade artek-brain`, затем `brain setup` в каждом проекте и перезапуск сессий агентов (MCP-сервер стартует вместе с сессией).
 
+## Документация
+Документация на английском:
+- [Архитектура](docs/architecture.md)
+- [Использование](docs/usage.md)
+- [Настройка](docs/configuration.md)
+- [Решения и ограничения](docs/design-decisions.md)
+- [Изменения по версиям](CHANGELOG.md)
+
 ## Тесты и замеры
 ```bash
-uv run pytest -q                              # 183 теста
+uv run pytest -q                              # 185 тестов, песочница пропущена
 BRAIN_SANDBOX_TESTS=1 uv run pytest -q        # плюс песочница (systemd-run)
 uv run python scripts/bench.py 1000           # скорость записи, чтения, поиска
 ```
