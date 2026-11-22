@@ -11,15 +11,15 @@ Agents (Claude Code, opencode, Cursor) lose context between sessions and overwri
 ## What it does
 
 - **Versioned documents.** Markdown with frontmatter. Every write is a new version with author, reason, sha256 and diff. Roll back a document, a version, one author's edits over a period, or a bad batch.
-- **Explicit conflicts.** Writes carry `base_version`; on mismatch the write is refused with the current version and diff. Edits to different sections merge, edits to the same section conflict.
+- **Explicit conflicts.** Writes carry `base_version`; on mismatch the write is refused with the current version number and the conflicting sections. Edits to different sections merge, edits to the same section conflict.
 - **Access control.** Read, write and admin rights by path prefix; scoped agent tokens with TTL and revocation. Agents cannot change `rules/`, `owner/` or approved documents; they leave proposals in `owner/inbox` for a human to approve.
 - **Secret scanning.** Writes containing keys, tokens or PEM blocks are rejected; secrets are stripped from logs.
 - **Search and navigation.** SQLite FTS5 (BM25) with filters, outlines with section sizes, reads by section or token budget, links and backlinks, "what changed since my last visit".
-- **Audit and metrics.** Every action is logged, searches included: who, what, when, why, from which session and client (Claude Code, opencode, HTTP).
+- **Audit and metrics.** Every action is logged, searches included: who, what, when, why, from which session and client (MCP sessions from Claude Code and opencode are labelled automatically).
 - **Cheap storage.** Metadata in SQLite (WAL), content in hash-addressed blobs with dedup and compression, quotas, garbage collection, backups with sha256 manifests.
 
 - **Knowledge aging.** Every document has a freshness deadline: explicit `review_by` in frontmatter, or a TTL per folder from `settings.json` (`backlog.md` 7 days, `docs/` 30, `notes/` 90 by default). The brief and `brain quality report` flag overdue documents and "docs behind notes": reference docs that were not updated while new notes piled up after them.
-- **Agent brief and hook.** `brain_op(action="brief")` returns a short (≤3000 chars) start-of-work digest: anchors, what to double-check before relying on it, recent changes, inbox. `brain setup` installs a Claude Code `SessionStart` hook, so the brief is injected on start and again after context compaction.
+- **Agent brief and hook.** `brain_op(action="brief")` returns a short (2000 chars by default) start-of-work digest: anchors, what to double-check before relying on it, recent changes, inbox. `brain setup` installs a Claude Code `SessionStart` hook, so the brief is injected on start and again after context compaction.
 
 ## How it fits together
 
@@ -53,7 +53,15 @@ uv tool install --from git+https://github.com/itsuppartem/artek-brain "artek-bra
 cd /path/to/project && brain setup --name "My project"
 ```
 
-`brain setup` creates `.brain/` (database plus `owner.token` and `agent.token`, mode 600, git-ignored), `.mcp.json` for Claude Code, `opencode.json` for opencode agents (each tagged with its own `BRAIN_CLIENT` for the audit log), a rules block in `AGENTS.md` and a `SessionStart` hook in `.claude/settings.json` (skipped if the hook is already in your user-level `~/.claude/settings.json`, which also covers git worktrees). Re-running it is safe and upgrades the rules block in place. Other commands never create an empty store silently. The MCP server looks for `.brain` up the directory tree, so agent worktrees inside the project share the same memory.
+`brain setup` creates `.brain/` (git-ignored; `brain.sqlite3`, `owner.token` and `agent.token` get mode 600), `.mcp.json` for Claude Code, `opencode.json` for opencode agents (each tagged with its own `BRAIN_CLIENT` for the audit log), a rules block in `AGENTS.md` and a `SessionStart` hook in `.claude/settings.json` (skipped if the hook is already in your user-level `~/.claude/settings.json`, which also covers git worktrees). Re-running it is safe and upgrades the rules block in place. Other commands never create an empty store silently. The MCP server looks for `.brain` up the directory tree, so agent worktrees inside the project share the same memory.
+
+## Documentation
+
+- [Architecture](docs/architecture.md): layers, modules, data model, write and read paths, merge rules, search, access control.
+- [Usage](docs/usage.md): setup, the six MCP tools and `brain_op` actions, CLI, HTTP API, the SessionStart hook, the agent workflow.
+- [Configuration](docs/configuration.md): environment variables, `settings.json`, `rules/schemas.json`, server flags.
+- [Design decisions](docs/design-decisions.md): why it is built this way, and the known trade-offs.
+- [Changelog](CHANGELOG.md)
 
 ## Performance
 
@@ -70,7 +78,7 @@ On disk: 15.6 MB including indexes and WAL.
 ## Tests
 
 ```bash
-uv run pytest -q                              # 183 tests
+uv run pytest -q                              # 185 tests, sandbox tests skipped
 BRAIN_SANDBOX_TESTS=1 uv run pytest -q        # plus sandbox tests (use systemd-run)
 uv run pytest -m load                          # load tests
 ```
