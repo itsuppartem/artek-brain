@@ -18,7 +18,7 @@
 uv tool install --from git+https://github.com/itsuppartem/artek-brain "artek-brain[mcp]"
 cd /путь/к/проекту && brain setup --name "Название"
 ```
-`brain setup` создаёт `.brain/` (база и токены `owner.token`, `agent.token`, права 600, в git не попадает), `.mcp.json` для Claude Code и `opencode.json` для opencode (у каждого своя метка `BRAIN_CLIENT` для журнала), блок правил в `AGENTS.md` и хук брифа в `.claude/settings.json`. Повторный запуск безопасен и обновляет блок правил. MCP ищет `.brain` вверх по каталогам, поэтому git-копии агентов внутри проекта пишут в ту же память. Остальные команды без найденного хранилища выдают ошибку, пустой мозг сам не создаётся.
+`brain setup` создаёт `.brain/` (база и токены `owner.token`, `agent.token`, права 600 на базы и токены, 700 на `blobs/`, в git не попадает), `.mcp.json` для Claude Code и `opencode.json` для opencode (у каждого своя метка `BRAIN_CLIENT` для журнала), блок правил в `AGENTS.md` и хук брифа в `.claude/settings.json`. Повторный запуск безопасен и обновляет блок правил. MCP ищет `.brain` вверх по каталогам, поэтому git-копии агентов внутри проекта пишут в ту же память. Остальные команды без найденного хранилища выдают ошибку, пустой мозг сам не создаётся.
 
 Обновить уже установленный инструмент: `uv tool upgrade artek-brain`, затем `brain setup` в каждом проекте и перезапуск сессий агентов (MCP-сервер стартует вместе с сессией).
 

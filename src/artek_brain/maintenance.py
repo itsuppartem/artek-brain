@@ -38,12 +38,13 @@ def checkpoint_databases(
 
 
 def maintain(store: Store, actor: str | None = None) -> dict[str, Any]:
-    """Почистить WAL, собрать мусор, перепаковать и вернуть отчёт."""
+    """Почистить WAL, перепаковать, собрать мусор и вернуть отчёт."""
     root = Path(store.root)
     checkpoints = checkpoint_databases(root)
     before = store.disk_report()
-    gc_result = store.gc(actor=actor).as_dict()
+    # Сначала repack: он освобождает блобы, которые затем убирает gc в том же запуске.
     repack_result = store.repack(actor=actor).as_dict()
+    gc_result = store.gc(actor=actor).as_dict()
     after = store.disk_report()
     repack_saved = max(
         0,

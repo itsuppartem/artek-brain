@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,8 @@ def test_maintain_owner_cleans_and_reports(tmp_path: Path) -> None:
         orphan = service.root / "blobs" / "ff" / ("a" * 62)
         orphan.parent.mkdir(parents=True, exist_ok=True)
         orphan.write_bytes(b"x" * (1024 * 1024))
+        old = time.time() - 7200  # gc не трогает свежие блобы
+        os.utime(orphan, (old, old))
 
         report = service.maintain(owner)
         names = {item["database"] for item in report["checkpoints"]}

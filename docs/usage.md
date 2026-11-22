@@ -517,7 +517,7 @@ Other commands: `ls`, `tree`, `blame`, `links`, `backlinks`, `changes [--cursor]
 brain serve                      # http://127.0.0.1:8765, --host, --port, --max-body (bytes, default 1 MiB)
 ```
 
-All routes except `/health` and `/openapi.json` need `Authorization: Bearer <token>`. Errors are `{"error": {"type", "message", "hint"}}` with status 400 (validation, secret), 401 (no or bad token), 403 (permission), 404 (not found), 409 (conflict, quota), 410 (deleted), 413 (body too large).
+All routes except `/health` and `/openapi.json` need `Authorization: Bearer <token>`. Errors are `{"error": {"type", "message", "hint"}}` (a conflict also carries `conflict`: current version, sections and a diff of at most 4000 characters) with status 400 (validation, secret), 401 (no or bad token), 403 (permission), 404 (not found), 409 (conflict, quota), 410 (deleted), 413 (body too large).
 
 | Method and path | Operation |
 |---|---|
@@ -540,7 +540,7 @@ All routes except `/health` and `/openapi.json` need `Authorization: Bearer <tok
 | `POST /sandbox/run`, `GET /sandbox/status/{id}`, `POST /sandbox/cancel/{id}` | sandbox |
 | `POST /rpc` | `{"op": "<Service method>", …params}` for any allowed operation |
 | `POST /read`, `POST /write`, `GET /history`, … | flat aliases taking `path` as a parameter |
-| `POST /overwrite` | owner only: replace the current version in place, no new version, no audit row |
+| `POST /overwrite` | owner only: replace the current version in place, no new version; an `overwrite` audit row keeps old and new sha256 |
 
 ```console
 $ T="$(cat .brain/agent.token)"
@@ -564,7 +564,8 @@ $ curl -s -H "Authorization: Bearer $T" -X POST localhost:8765/documents/notes/2
 $ curl -s -H "Authorization: Bearer $T" -X POST localhost:8765/documents/docs/deploy.md \
     -d '{"content": "# Deploy\n\n## Steps\n- Build.\n", "reason": "stale", "base_version": 1}' -w '\nHTTP %{http_code}\n'
 {"error": {"type": "ConflictError", "message": "Конфликт в документе «docs/deploy.md»: текущая версия 5, …
- Пересекаются разделы: Steps.", "hint": "Прочитайте документ заново через read(path) и передайте base_version=5 …"}}
+ Пересекаются разделы: Steps.", "hint": "Прочитайте документ заново через read(path) и передайте base_version=5 …",
+  "conflict": {"path": "docs/deploy.md", "current_version": 5, "conflicting_sections": ["Steps"], "diff": "--- docs/deploy.md@5\n+++ new\n…", "diff_truncated": false}}}
 HTTP 409
 
 $ curl -s -H "Authorization: Bearer $T" -X POST localhost:8765/rpc -d '{"op": "history", "path": "docs/deploy.md", "limit": 1}'
@@ -627,6 +628,6 @@ The rules block that `brain setup` writes to `AGENTS.md` describes this loop. In
    - `op: "write"`: nobody changed the document since you read it.
    - `op: "merge"`: someone changed *other* sections; their edits are kept and yours are applied.
    - `op: "noop"`: your content equals the current version.
-5. **On a conflict** (`ConflictError`, HTTP 409): someone changed the *same* section after you read it. Nothing was written. Read the current version (`brain_read(path)`), or look at what changed with `brain_op(action="diff", path=…, a=<your base>, b=<current>)` and `brain_op(action="history", path=…)`. Re-apply your edit on top of the current text and write again with `base_version=<current>`. Do not retry with the old `base_version`, and do not drop the other agent's edit unless you mean to.
+5. **On a conflict** (`ConflictError`, HTTP 409): someone changed the *same* section after you read it. Nothing was written. The response already has a diff of the current text against yours (`conflict.diff` in HTTP, MCP and `--json`, stderr in plain CLI). Read the current version (`brain_read(path)`), or look at what changed with `brain_op(action="diff", path=…, a=<your base>, b=<current>)` and `brain_op(action="history", path=…)`. Re-apply your edit on top of the current text and write again with `base_version=<current>`. Do not retry with the old `base_version`, and do not drop the other agent's edit unless you mean to.
 6. **Finish.** Write a note to `notes/` and update the reference document in `docs/` (or `backlog.md`) if facts or decisions changed. For `README.md`, `rules/`, `approved/` and `owner/`, which only the owner can change, leave a proposal in `owner/inbox/<name>.md`.
 7. **Delegating.** When handing work to a subagent or another session, put "start with `brain_op(action=\"brief\")`, write the result to memory" into its prompt; in production use, subagents ignored memory unless the prompt named it.

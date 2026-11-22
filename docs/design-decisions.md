@@ -84,13 +84,13 @@ Short records of the main decisions: what was decided, what the alternative was,
 
 ## 7. TTL-based aging instead of mandatory frontmatter
 
-**Decision.** Every document has a freshness period derived from its path (`settings.json` → `aging.ttl_days`; defaults: `backlog.md` 7 days, `docs/` 30, `notes/` 90, others 60). A document whose last version is older than its TTL is reported as overdue in the brief and the quality report. A detector flags reference documents after which three or more new notes appeared ("docs behind notes"). An explicit `review_by` in frontmatter still takes precedence in the quality report.
+**Decision.** Every document has a freshness period derived from its path (`settings.json` → `aging.ttl_days`; defaults: `backlog.md` 7 days, `docs/` 30, `notes/` 90, others 60). A document whose last version is older than its TTL is reported as overdue in the brief and the quality report. A detector flags reference documents after which three or more new notes appeared ("docs behind notes"). An explicit `review_by` in frontmatter still takes precedence, in the brief and in the quality report.
 
 **Alternative.** Require `review_by` and `owner` in frontmatter, enforced by schema on every write (what `quality.py` supported since 0.1.0).
 
 **Why.** The audit of a production instance after its first week (README, "Lessons from real use"; `notes/BRAIN-12.md`): agents almost never set `review_by`, so the quality report showed 100% freshness while reference docs had not been touched since they were first filled; a typical operational fact stayed true for 3–5 days; 50+ notes piled up while docs stayed the same. Requiring frontmatter would have turned every write into a schema negotiation and still produced made-up dates. A TTL per folder needs no cooperation from the writer and encodes what the owner actually knows: the backlog goes stale in a week, architecture notes in months.
 
-**Cost.** TTLs are heuristics; a stable document will be flagged on schedule even if nothing changed. The brief uses the TTL even for documents that have `review_by`.
+**Cost.** TTLs are heuristics; a stable document will be flagged on schedule even if nothing changed, unless it sets `review_by`.
 
 ## 8. Brief injected by a hook, including after compaction
 
@@ -122,9 +122,8 @@ Short records of the main decisions: what was decided, what the alternative was,
 - **Morphology is crude.** The `match=any` fallback cuts the last two characters of words longer than five and uses them as prefixes. It helps with Russian and English inflection in common cases and over-matches or misses in others. There is no stemmer or lemmatiser, by design (stdlib only).
 - **Semantic search is brute force.** Cosine over all chunks in Python, with an FTS prefilter above 50,000 chunks; no ANN index. The default `hash` embedder is lexical, not semantic in the model sense.
 - **Every read writes.** Reads are audited in the same transaction, so a read is a small write transaction. This is what makes "who read what before acting" answerable, and it limits read throughput under heavy concurrency.
-- **Owner overwrite bypasses history.** `overwrite` (owner only) replaces the current version in place without a new version or an audit row, against the specification's "nothing is overwritten without a trace" (TZ §1.2). It exists for hot fixes and is not available to agents.
-- **Conflict diff is not returned.** `ConflictError` computes a unified diff, but the CLI, HTTP and MCP responses carry only the message, the current version number and the conflicting sections; the agent re-reads the document or calls `diff`.
-- **Quotas are global and code-configured.** Per-document size, versions per document and writes per author per day; no per-area quotas (TZ §3.12 mentions them), and no settings file for them.
+- **Owner overwrite bypasses history.** `overwrite` (owner only) replaces the current version in place without a new version. The previous content of that version is not kept, but an `overwrite` audit row records who did it and the old and new sha256, so the trace required by TZ §1.2 stays. It exists for hot fixes and is not available to agents.
+- **Quotas are global.** Per-document size, versions per document, writes per author per day and total disk, set in `settings.json`; no per-area quotas (TZ §3.12 mentions them).
 - **The sandbox is Linux-only.** It needs `bwrap` and `systemd-run`; without them, runs are refused.
 - **Messages are in Russian.** Error messages, hints, the brief and CLI text output are in Russian; JSON keys and structure are English.
 - **No scheduled jobs.** Backups, `maintain`, drift checks and anomaly scans run when called; there is no built-in scheduler and no restore command (restoring is unpacking the archive).

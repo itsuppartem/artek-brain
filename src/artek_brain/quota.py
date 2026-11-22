@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, fields
+from pathlib import Path
+from typing import Any
 
 from .errors import QuotaError
 
@@ -21,6 +24,35 @@ class Quota:
     max_versions_per_document: int = 10_000
     max_writes_per_author_per_day: int = 100_000
     max_disk_bytes: int | None = None
+
+    @classmethod
+    def from_settings(cls, root: str | Path) -> "Quota":
+        """Лимиты из блока ``quota`` в settings.json; ошибки = значения по умолчанию.
+
+        Пример: ``{"quota": {"max_document_bytes": 2097152, "max_disk_bytes": null}}``.
+        """
+        try:
+            raw: Any = json.loads((Path(root) / "settings.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return cls()
+        block = raw.get("quota") if isinstance(raw, dict) else None
+        if not isinstance(block, dict):
+            return cls()
+        values: dict[str, Any] = {}
+        for item in fields(cls):
+            if item.name not in block:
+                continue
+            value = block[item.name]
+            if value is None and item.name == "max_disk_bytes":
+                values[item.name] = None
+                continue
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                values[item.name] = number
+        return cls(**values)
 
     def check_document_size(self, size: int, path: str | None = None) -> None:
         """Проверить размер содержимого в байтах."""

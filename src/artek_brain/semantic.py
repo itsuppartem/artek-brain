@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from .perms import restrict_db
 from . import frontmatter
 from .embeddings import (
     DEFAULT_HASH_DIM,
@@ -269,6 +270,7 @@ class SemanticIndex:
         self._conn.execute("PRAGMA busy_timeout=30000")
         with self._conn:
             self._conn.executescript(_SCHEMA)
+        restrict_db(self.db_path)
         self._meta: dict[str, str] = {}
         self._refresh_state()
 
@@ -420,7 +422,7 @@ class SemanticIndex:
             return {
                 "chunks": self.chunk_count(),
                 "model": self._meta.get("model"),
-                "dim": self._meta.get("dim"),
+                "dim": int(self._meta["dim"]) if str(self._meta.get("dim") or "").isdigit() else None,
                 "stale": self._stale,
                 "stale_reason": self._stale_reason,
             }

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .errors import ArtekBrainError, PermissionDenied
+from .errors import ArtekBrainError, ConflictError, PermissionDenied
 from .service import Service, resolve_root
 
 PROG = "brain"
@@ -98,6 +98,9 @@ def _print_text(command: str, data: Any) -> None:
         return
     if isinstance(data, str):
         print(data)
+        return
+    if isinstance(data, dict) and "revoked" in data and "by" in data:
+        print(f"отозвано токенов: {data['revoked']}")
         return
     if command == "quality" and isinstance(data, dict):
         action = data.get("action")
@@ -284,7 +287,7 @@ def _print_text(command: str, data: Any) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
-        description="Artek Brain: общая память, поиск и доска задач.",
+        description="Artek Brain: общая версионируемая память, поиск и координация агентов.",
     )
     _add_common(parser, top=True)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1130,9 +1133,16 @@ def _error(args: argparse.Namespace, exc: Exception) -> None:
             "message": message,
             "hint": getattr(exc, "hint", None),
         }
+        if isinstance(exc, ConflictError):
+            payload["conflict"] = exc.details()
         _print_json(payload)
     else:
         print(f"Ошибка: {message}", file=sys.stderr)
+        if isinstance(exc, ConflictError) and exc.diff:
+            details = exc.details()
+            print(details["diff"], file=sys.stderr)
+            if details["diff_truncated"]:
+                print("… diff обрезан", file=sys.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

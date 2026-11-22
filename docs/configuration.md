@@ -1,6 +1,6 @@
 # Configuration
 
-artek-brain has three places for configuration: environment variables, the store's `settings.json`, and documents inside the memory (`rules/schemas.json`). Command-line flags cover the servers. Anything not listed here (quotas, sandbox limits, anomaly thresholds) is set through the Python API only, see [Not configurable from files](#not-configurable-from-files).
+artek-brain has three places for configuration: environment variables, the store's `settings.json`, and documents inside the memory (`rules/schemas.json`). Command-line flags cover the servers. Anything not listed here (sandbox limits, anomaly thresholds) is set through the Python API only, see [Not configurable from files](#not-configurable-from-files).
 
 - [Environment variables](#environment-variables)
 - [settings.json](#settingsjson)
@@ -104,7 +104,7 @@ Key matching (`AgingSettings.ttl_for`):
 - any other key is an exact path or an `fnmatch` pattern: `docs/prod.md`, `notes/*.md`;
 - the longest matching key wins, so `docs/prod.md` (7) beats `docs/` (30).
 
-A document is overdue when the age of its last version exceeds its TTL. Overdue documents appear in the brief under "check before relying" and in `brain quality report`. In the quality report, a document with `review_by` in its frontmatter is judged by `review_by` instead of the TTL; the brief uses the TTL for every document.
+A document is overdue when the age of its last version exceeds its TTL. Overdue documents appear in the brief under "check before relying" and in `brain quality report`. A document with `review_by` in its frontmatter is judged by `review_by` instead of the TTL, both in the brief and in the quality report.
 
 Example: a project where the deploy runbook goes stale in three days and decisions are kept for half a year:
 
@@ -207,16 +207,27 @@ To pass a flag from Claude Code, add it to `args` in `.mcp.json`: `"args": ["mcp
 | `--port` | `8765` | Port. |
 | `--max-body` | `1048576` | Maximum request body in bytes; larger bodies get HTTP 413. |
 
+## Quotas
+
+The `quota` block of `settings.json` sets storage limits. Missing or invalid values keep the default; changes apply when a process opens the store.
+
+```json
+{"quota": {"max_document_bytes": 2097152, "max_disk_bytes": 1073741824}}
+```
+
+| Key | Default |
+|---|---|
+| `max_document_bytes` | 1 MiB |
+| `max_versions_per_document` | 10,000 |
+| `max_writes_per_author_per_day` | 100,000 |
+| `max_disk_bytes` | none (`null`) |
+
 ## Not configurable from files
 
-These limits have defaults in code and can be changed only by constructing the objects yourself in Python (for example `Service(root, quota=Quota(...))`); the CLI, MCP and HTTP servers use the defaults.
+These limits have defaults in code and can be changed only by constructing the objects yourself in Python; the CLI, MCP and HTTP servers use the defaults.
 
 | Setting | Where | Default |
 |---|---|---|
-| Document size | `Quota.max_document_bytes` | 1 MiB |
-| Versions per document | `Quota.max_versions_per_document` | 10,000 |
-| Writes per author per UTC day | `Quota.max_writes_per_author_per_day` | 100,000 |
-| Total store size | `Quota.max_disk_bytes` | none |
 | Full snapshot interval / delta threshold | `Store(snapshot_every=…, delta_ratio=…)` | 20 / 0.9 (`brain repack --snapshot-every N` overrides the interval for one repack) |
 | Sandbox limits and role ceilings | `SandboxConfig` | agent: 10 s CPU, 20 s wall, 512 MiB, 32 processes; 2 concurrent runs, 1 per token |
 | Sandbox tool calls per token per day | `Registry.register(..., daily_limit=100)` in `Service` | 100 |

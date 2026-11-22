@@ -25,6 +25,6 @@ def test_failed_insert_does_not_change_document(
     assert [item.n for item in store.history("a.md")] == [1]
     assert store.stats()["versions"] == 1
 
-    removed = store.gc(actor="checker")
+    removed = store.gc(actor="checker", min_age_seconds=0)
     assert removed.removed >= 1
     assert store.read("a.md").version == 1

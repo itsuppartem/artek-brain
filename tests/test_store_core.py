@@ -188,7 +188,7 @@ def test_gc_removes_orphan_blob(store: Store) -> None:
     orphan = orphan_dir / ("b" * 62)
     orphan.write_bytes(b"orphan")
 
-    result = store.gc(actor="admin")
+    result = store.gc(actor="admin", min_age_seconds=0)
     assert result.removed == 1
     assert orphan.exists() is False
     assert referenced[0].exists() is True

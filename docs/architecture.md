@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes how artek-brain is built, as of version 0.2.0. Every statement here points at code in `src/artek_brain/`; file and function names are given so you can check them.
+This document describes how artek-brain is built, as of version 0.2.1. Every statement here points at code in `src/artek_brain/`; file and function names are given so you can check them.
 
 - [Layers](#layers)
 - [Modules](#modules)
@@ -89,7 +89,7 @@ All 30 files in `src/artek_brain/` (about 18.8k lines including docstrings).
 | `sandbox.py` | Script sandbox: bubblewrap + transient systemd scope + prlimit, read-only data slice, network off. |
 | `registry.py` | Tool registry (`registry.sqlite3`): JSON schema, minimum role, daily call limit, call log, separate secrets table. |
 | `backup.py` | `tar.gz` backups via `sqlite3.Connection.backup`, sha256 manifest, rotation, verification. |
-| `maintenance.py` | `wal_checkpoint(TRUNCATE)` on every `*.sqlite3`, then gc, repack, disk report. |
+| `maintenance.py` | `wal_checkpoint(TRUNCATE)` on every `*.sqlite3`, then repack, gc (so blobs freed by repack go in the same run), disk report. |
 
 ## Files on disk
 
@@ -97,7 +97,7 @@ A store is one directory, by default `<project>/.brain/`:
 
 | Path | Content |
 |---|---|
-| `brain.sqlite3` | Documents, versions, audit, delta metadata, inbox, presence, proposals, review queue, anomaly incidents. Mode 600. |
+| `brain.sqlite3` | Documents, versions, audit, delta metadata, inbox, presence, proposals, review queue, anomaly incidents. Mode 600 (as are `search.sqlite3`, `access.sqlite3` and `semantic.sqlite3`; `blobs/` is mode 700). |
 | `blobs/aa/bbbb…` | Content blobs, file name = sha256 (first two hex chars are the folder). |
 | `access.sqlite3` | Tokens (sha256 of the token, never the token itself). Created with the default umask, like the other databases below. |
 | `search.sqlite3` | FTS5 index (derived, can be rebuilt). Holds the full text of documents. |
@@ -171,7 +171,7 @@ CREATE TABLE version_blobs (
 - **Reading** (`read_content`): a full blob is decompressed directly; otherwise the chain is rebuilt from the nearest full snapshot and the result is checked against the expected sha256.
 - **Repack** (`store.repack`, `brain repack`): rewrites existing versions into the delta layout in one transaction, verifies sha256 after every version, and is idempotent.
 - **Archive** (`store.archive_old_versions(older_than, keep_last)`, Python API only): recompresses cold versions with lzma and marks them `archived`.
-- **GC** (`store.gc`): deletes every file under `blobs/` that is not referenced by a `versions` row without delta metadata or by `version_blobs.blob_sha256`.
+- **GC** (`store.gc`): deletes every file under `blobs/` that is not referenced by a `versions` row without delta metadata or by `version_blobs.blob_sha256` and is older than one hour (`GC_GRACE_SECONDS`). The grace period protects a blob that another process has written but not yet committed.
 
 The load test in `notes/BRAIN-5.md` (500 documents, 20,000 versions of ~25 KB, one process) measured 13.4 MB of blobs against 499 MB of logical full copies, and 35 MB on disk in total, including SQLite.
 
@@ -224,7 +224,7 @@ Step by step, with the function that does it:
    - content identical to the current version: `op = "noop"`, no new version.
 8. **Merge or conflict** — if `base_version == current`, or the base version has the same sha256 as the current one, the content is written as is (`op = "write"`). Otherwise `_merge_three_way(base, current, new)` runs; see the next section. A clean merge produces `op = "merge"`, `merged = true`.
 9. **Remaining quotas** — versions per document and writes per author per UTC day; then size and secret scan again on the *final* (possibly merged) text.
-10. **Blob** — `DeltaStorage.put_version` writes the blob file (full or delta) and its `version_blobs` row, checking `max_disk_bytes` if set. Blob files are written with a temp file and `os.replace`; if the transaction later rolls back, the orphan file is removed by the next `gc`.
+10. **Blob** — `DeltaStorage.put_version` writes the blob file (full or delta) and its `version_blobs` row, checking `max_disk_bytes` if set. Blob files are written with a temp file and `os.replace`; if the transaction later rolls back, the orphan file is removed by a `gc` that runs at least an hour later.
 11. **Metadata and audit** — insert into `documents` (for a new path) and `versions`, update `documents.current_version`, insert the audit row with version, op, sha256, size, merged, batch and reason. Then commit.
 12. **Failure audit** — on any `ArtekBrainError` the failure is logged in a separate short transaction (`_log_failure`, `ok: false`).
 13. **Indexes** — after commit, `Brain.write` calls `Search.update(path)` and, if semantic search is on, `SemanticIndex.update(path)`. These run outside the store transaction; if they fail, the next search catches up via the fingerprint check (see [Search](#search)).
@@ -232,7 +232,7 @@ Step by step, with the function that does it:
 
 `delete`, `restore` and `rollback_*` follow the same pattern: permission check in `Brain`, one transaction in `Store` that adds a new version (`op` is `delete`, `restore`, `rollback`, `rollback_author` or `rollback_batch`) and an audit row, then an index update. History is never rewritten by these operations.
 
-> **Exception: `overwrite`.** `Store.overwrite_current` (exposed as `Service.overwrite` and `POST /overwrite`, owner only) replaces the content of the *current* version in place: no new version, no audit row. It exists for owner hot fixes. It still runs the secret scan, size quota and approval guard. Agents and humans cannot call it.
+> **Exception: `overwrite`.** `Store.overwrite_current` (exposed as `Service.overwrite` and `POST /overwrite`, owner only) replaces the content of the *current* version in place: no new version, but an `overwrite` audit row records the old and new sha256. It exists for owner hot fixes. It still runs the secret scan, size quota and approval guard. Agents and humans cannot call it.
 
 ## Section merge and conflicts
 

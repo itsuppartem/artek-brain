@@ -2,9 +2,32 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). Versions are not tagged in git; dates are those of the last commit of each version.
 
+## [0.2.1] - 2026-11-22
+
+Fixes for issues found while writing the architecture and usage docs.
+
+### Added
+
+- Conflicts return a diff: `conflict` with the current version, conflicting sections and a unified diff (up to 4000 characters) in HTTP, MCP and `--json`; plain CLI prints the diff to stderr.
+- Quotas are configurable in `settings.json` → `quota`.
+- The brief honours `review_by` from frontmatter, like the quality report.
+
+### Changed
+
+- `maintain` runs repack before gc, so space freed by repack is reclaimed in the same run.
+- Owner `overwrite` still creates no new version, but now writes an `overwrite` audit row with the old and new sha256.
+- Version strings in the OpenAPI document and the MCP `serverInfo` come from the package version; CLI and OpenAPI descriptions no longer mention the removed task board.
+
+### Fixed
+
+- `brain_op(action="changes", cursor=N)` in MCP: the cursor was taken by the response limiter, so the feed always started from 0 and the answer was cut at character N. Response continuation for `changes` now uses `response_cursor`.
+- `search.sqlite3` (full text of documents), `access.sqlite3` and `semantic.sqlite3` were created with mode 644; they are now 600, and `blobs/` is 700.
+- `gc` could delete a blob that another process had written but not yet committed; it now skips files younger than one hour.
+- `semantic` status returns `dim` as a number; `brain token revoke` without `--json` prints how many tokens were revoked.
+
 ## [0.2.0] - 2026-11-22
 
-Changes driven by an audit of a production instance after its first week of use (13–21.11.2026): reference docs were not updated, truncated reads were not continued, multi-word searches often returned nothing, the audit log had no sessions or searches, and agents did not re-read memory after context compaction. Merged as pull requests #1 and #2.
+Changes driven by an audit of a production instance after its first week of use (13–21.11.2026): reference docs were not updated, truncated reads were not continued, multi-word searches often returned nothing, the audit log had no sessions or searches, and agents did not re-read memory after context compaction.
 
 ### Added
 
@@ -31,7 +54,7 @@ Changes driven by an audit of a production instance after its first week of use 
 
 ### Fixed
 
-- Search audit rows were written outside a committed transaction, so an MCP process kept the SQLite write lock after its first search and other processes got "database is locked". The row is now written in its own short transaction (#2).
+- Search audit rows were written outside a committed transaction, so an MCP process kept the SQLite write lock after its first search and other processes got "database is locked". The row is now written in its own short transaction.
 - `brain_search(type=...)` failed; the `type` filter now works over MCP.
 - Contradiction detection no longer takes a number from the middle of a phrase as a fact.
 
@@ -65,5 +88,6 @@ First version. Built from the specification in `docs/TZ.md`, stage by stage (`no
 
 - The task board (tasks, claims with leases, reviews, handoffs, evidence checks, server-side runs) was built during 0.1.0 development and removed on 2026-11-12 before the version was finished; see [docs/design-decisions.md](docs/design-decisions.md#removing-the-task-board).
 
+[0.2.1]: https://github.com/itsuppartem/artek-brain/compare/3aadd7a...main
 [0.2.0]: https://github.com/itsuppartem/artek-brain/compare/550d5b7...3aadd7a
 [0.1.0]: https://github.com/itsuppartem/artek-brain/commits/550d5b7

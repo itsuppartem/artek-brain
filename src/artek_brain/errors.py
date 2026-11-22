@@ -76,6 +76,18 @@ class ConflictError(ArtekBrainError):
             ),
         )
 
+    def details(self, max_diff_chars: int = 4000) -> dict[str, object]:
+        """Данные конфликта для ответа: версия, разделы и diff (обрезанный)."""
+        diff = self.diff or ""
+        cut = len(diff) > max_diff_chars
+        return {
+            "path": self.path,
+            "current_version": self.current_version,
+            "conflicting_sections": list(self.conflicting_sections),
+            "diff": diff[:max_diff_chars],
+            "diff_truncated": cut,
+        }
+
 
 class SecretDetectedError(ArtekBrainError):
     """В тексте найден секрет; сам секрет в сообщение не попадает."""

@@ -11,7 +11,7 @@ Agents (Claude Code, opencode, Cursor) lose context between sessions and overwri
 ## What it does
 
 - **Versioned documents.** Markdown with frontmatter. Every write is a new version with author, reason, sha256 and diff. Roll back a document, a version, one author's edits over a period, or a bad batch.
-- **Explicit conflicts.** Writes carry `base_version`; on mismatch the write is refused with the current version number and the conflicting sections. Edits to different sections merge, edits to the same section conflict.
+- **Explicit conflicts.** Writes carry `base_version`; on mismatch the write is refused with the current version number, the conflicting sections and a diff. Edits to different sections merge, edits to the same section conflict.
 - **Access control.** Read, write and admin rights by path prefix; scoped agent tokens with TTL and revocation. Agents cannot change `rules/`, `owner/` or approved documents; they leave proposals in `owner/inbox` for a human to approve.
 - **Secret scanning.** Writes containing keys, tokens or PEM blocks are rejected; secrets are stripped from logs.
 - **Search and navigation.** SQLite FTS5 (BM25) with filters, outlines with section sizes, reads by section or token budget, links and backlinks, "what changed since my last visit".
@@ -53,7 +53,7 @@ uv tool install --from git+https://github.com/itsuppartem/artek-brain "artek-bra
 cd /path/to/project && brain setup --name "My project"
 ```
 
-`brain setup` creates `.brain/` (git-ignored; `brain.sqlite3`, `owner.token` and `agent.token` get mode 600), `.mcp.json` for Claude Code, `opencode.json` for opencode agents (each tagged with its own `BRAIN_CLIENT` for the audit log), a rules block in `AGENTS.md` and a `SessionStart` hook in `.claude/settings.json` (skipped if the hook is already in your user-level `~/.claude/settings.json`, which also covers git worktrees). Re-running it is safe and upgrades the rules block in place. Other commands never create an empty store silently. The MCP server looks for `.brain` up the directory tree, so agent worktrees inside the project share the same memory.
+`brain setup` creates `.brain/` (git-ignored; every `*.sqlite3`, `owner.token` and `agent.token` get mode 600, `blobs/` mode 700), `.mcp.json` for Claude Code, `opencode.json` for opencode agents (each tagged with its own `BRAIN_CLIENT` for the audit log), a rules block in `AGENTS.md` and a `SessionStart` hook in `.claude/settings.json` (skipped if the hook is already in your user-level `~/.claude/settings.json`, which also covers git worktrees). Re-running it is safe and upgrades the rules block in place. Other commands never create an empty store silently. The MCP server looks for `.brain` up the directory tree, so agent worktrees inside the project share the same memory.
 
 ## Documentation
 
@@ -89,7 +89,7 @@ Designed and specified by me; most of the code was written by AI coding agents (
 
 ## Status
 
-Early (0.2.0), single-tenant, self-hosted. Python 3.12+, stdlib plus minimal dependencies (`mcp` is optional).
+Early (0.2.1), single-tenant, self-hosted. Python 3.12+, stdlib plus minimal dependencies (`mcp` is optional).
 
 ## License
 

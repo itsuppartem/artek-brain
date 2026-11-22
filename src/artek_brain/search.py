@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from .perms import restrict_db
 from . import frontmatter
 from .errors import DeletedError, NotFoundError, ValidationError
 
@@ -265,6 +266,7 @@ class Search:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
+        restrict_db(self.db_path)
         return conn
 
     def _open_connection(self) -> sqlite3.Connection:

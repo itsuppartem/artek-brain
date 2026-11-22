@@ -366,7 +366,7 @@ class Service:
         session: str | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
-        """Правка текущей версии на месте без новой версии и журнала (владелец)."""
+        """Правка текущей версии на месте без новой версии; след в журнале (владелец)."""
         return _jsonable(
             self.brain.overwrite(
                 token or "",

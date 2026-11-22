@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .perms import restrict_db
 from .errors import PermissionDenied, ValidationError
 
 ROLES = ("owner", "human", "agent", "auditor")
@@ -325,6 +326,7 @@ class Access:
         with self._conn:
             self._conn.executescript(_SCHEMA)
             self._ensure_columns()
+        restrict_db(self.db_path)
 
     def _ensure_columns(self) -> None:
         """Добавить новые колонки в старую базу без потери токенов."""

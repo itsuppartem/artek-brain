@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import threading
 import unicodedata
 import zlib
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any, Sequence
 from uuid import uuid4
 
+from .perms import restrict_db, restrict_dir
 from . import secrets as secret_scanner
 from .deltas import ArchiveResult, DeltaStorage, RepackResult
 from .errors import (
@@ -44,16 +46,13 @@ _DAY = timedelta(days=1)
 # хранилище не откроет и не испортит.
 SCHEMA_VERSION = 1
 
+# gc не удаляет блобы моложе этого срока: защита от гонки с записью в другом процессе.
+GC_GRACE_SECONDS = 3600.0
+
 
 def _restrict_files(db_path: Path) -> None:
     """Права 600 на файлы базы: память проекта читает только владелец."""
-    for suffix in ("", "-wal", "-shm"):
-        target = Path(str(db_path) + suffix)
-        try:
-            if target.exists():
-                target.chmod(0o600)
-        except OSError:
-            continue
+    restrict_db(db_path)
 
 
 _SCHEMA = """
@@ -512,8 +511,9 @@ class Store:
         self.root.mkdir(parents=True, exist_ok=True)
         self.blobs_dir = self.root / "blobs"
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
+        restrict_dir(self.blobs_dir)
         self.db_path = self.root / "brain.sqlite3"
-        self.quota = quota or Quota()
+        self.quota = quota or Quota.from_settings(self.root)
         self._lock = threading.RLock()
         self._closed = False
         self._conn = sqlite3.connect(
@@ -884,8 +884,8 @@ class Store:
     ) -> WriteResult:
         """Перезаписать текущую версию документа на месте.
 
-        Новая версия не создаётся, запись в журнал не делается: это правка
-        «на горячую» для владельца. Прошлые версии и их история не трогаются.
+        Новая версия не создаётся: это правка «на горячую» для владельца.
+        В журнал пишется строка overwrite со старым и новым sha256. Прошлые версии и их история не трогаются.
         Текущая версия — это вершина цепочки дельт, от неё ничего не зависит,
         поэтому замена её содержимого безопасна. Для нового документа создаётся
         обычная первая версия (от неё отказаться нельзя).
@@ -942,6 +942,21 @@ class Store:
                 self._conn.execute(
                     "UPDATE versions SET sha256=?, size=?, ts=? WHERE path=? AND n=?",
                     (sha, size, ts, path, current_n),
+                )
+                # Новой версии нет, но след остаётся: кто, когда, что было и что стало.
+                self._audit_ok(
+                    author,
+                    "overwrite",
+                    path,
+                    {
+                        "version": current_n,
+                        "old_sha256": current.sha256,
+                        "old_size": current.size,
+                        "new_sha256": sha,
+                        "new_size": size,
+                    },
+                    session,
+                    model,
                 )
                 return WriteResult(
                     path=path,
@@ -2301,8 +2316,15 @@ class Store:
             self._ensure_open()
             return self.storage.disk_report(days=days, forecast_days=forecast_days)
 
-    def gc(self, *, actor: str | None = None) -> GcResult:
-        """Удалить блобы, на которые не ссылается ни одна версия или дельта."""
+    def gc(
+        self, *, actor: str | None = None, min_age_seconds: float = GC_GRACE_SECONDS
+    ) -> GcResult:
+        """Удалить блобы, на которые не ссылается ни одна версия или дельта.
+
+        Свежие файлы (моложе ``min_age_seconds``) не трогаются: другой процесс
+        мог записать блоб и ещё не закоммитить версию, которая на него ссылается.
+        """
+        cutoff = time.time() - max(0.0, float(min_age_seconds))
         with self._lock:
             self._ensure_open()
             with self._conn:
@@ -2323,7 +2345,10 @@ class Store:
                     if sha is not None and sha in referenced:
                         continue
                     try:
-                        size = item.stat().st_size
+                        stat = item.stat()
+                        if stat.st_mtime > cutoff:
+                            continue
+                        size = stat.st_size
                         item.unlink()
                     except OSError:
                         continue

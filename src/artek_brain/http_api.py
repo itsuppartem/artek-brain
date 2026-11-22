@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Sequence
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import __version__
 from .errors import (
     ArtekBrainError,
     ConflictError,
@@ -185,6 +186,8 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
                     "hint": exc.hint,
                 }
             }
+            if isinstance(exc, ConflictError):
+                payload["error"]["conflict"] = exc.details()
         else:
             status = 500
             payload = {
@@ -666,9 +669,9 @@ OPENAPI: dict[str, Any] = {
     "openapi": "3.0.3",
     "info": {
         "title": "Artek Brain HTTP API",
-        "version": "0.1.0",
+        "version": __version__,
         "description": (
-            "JSON API общей памяти и доски задач. Все операции кроме "
+            "JSON API общей версионируемой памяти. Все операции кроме "
             "/health и /openapi.json требуют Bearer-токен."
         ),
     },

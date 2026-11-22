@@ -27,7 +27,7 @@ def _audit_count(brain: Brain, path: str) -> int:
     )
 
 
-def test_overwrite_keeps_single_version_and_no_audit(brain: Brain, tokens: dict[str, str]) -> None:
+def test_overwrite_keeps_single_version_and_leaves_trace(brain: Brain, tokens: dict[str, str]) -> None:
     brain.write(tokens["owner"], "notes/a.md", "первая\n", "старт")
     assert brain.store.history("notes/a.md")  # версия 1 есть
     audit_before = _audit_count(brain, "notes/a.md")
@@ -39,8 +39,8 @@ def test_overwrite_keeps_single_version_and_no_audit(brain: Brain, tokens: dict[
     hist = brain.store.history("notes/a.md")
     assert len(hist) == 1
     assert brain.read(tokens["owner"], "notes/a.md").content == "вторая\n"
-    # Журнал не вырос от правки на горячую.
-    assert _audit_count(brain, "notes/a.md") == audit_before
+    # Новой версии нет, но в журнале осталась одна строка overwrite.
+    assert _audit_count(brain, "notes/a.md") == audit_before + 1
 
 
 def test_overwrite_preserves_prior_history(brain: Brain, tokens: dict[str, str]) -> None:

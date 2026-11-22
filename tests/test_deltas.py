@@ -171,7 +171,7 @@ def test_gc_keeps_delta_bases_and_removes_orphans(tmp_path: Path) -> None:
         orphan.parent.mkdir(parents=True, exist_ok=True)
         orphan.write_bytes(b"orphan")
 
-        result = store.gc()
+        result = store.gc(min_age_seconds=0)
         assert result.removed >= 1
         assert not orphan.exists()
 
@@ -186,7 +186,7 @@ def test_gc_keeps_delta_bases_and_removes_orphans(tmp_path: Path) -> None:
             assert store.read("docs/a.md", version=n).content == _text(n)
 
         store.repack(snapshot_every=10)
-        store.gc()
+        store.gc(min_age_seconds=0)
         for n in range(1, 31):
             assert store.read("docs/a.md", version=n).content == _text(n)
     finally:

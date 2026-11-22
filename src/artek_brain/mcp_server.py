@@ -15,7 +15,8 @@ import sys
 import uuid
 from typing import Any, Callable
 
-from .errors import ArtekBrainError, ValidationError
+from . import __version__
+from .errors import ArtekBrainError, ConflictError, ValidationError
 from .service import Service
 
 DEFAULT_MAX_CHARS = 8000
@@ -133,7 +134,14 @@ _TOOL_DEFS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Имя действия; список в brain_help().",
                 },
-                "cursor": {"type": "string", "description": "Курсор продолжения ответа."},
+                "cursor": {
+                    "type": "string",
+                    "description": "Курсор продолжения ответа; у changes — курсор ленты.",
+                },
+                "response_cursor": {
+                    "type": "string",
+                    "description": "Курсор продолжения ответа для changes.",
+                },
             },
             "required": ["action"],
             "additionalProperties": True,
@@ -242,7 +250,8 @@ _ACTION_HELP: dict[str, tuple[str, str, str]] = {
     "changes": (
         "Лента изменений после курсора. Параметры: cursor, limit=100.",
         "brain_op(action=\"changes\", cursor=0, limit=50)",
-        "Возвращает items, cursor, next_cursor, has_more.",
+        "Возвращает items, cursor, next_cursor, has_more. Длинный ответ "
+        "продолжается по response_cursor.",
     ),
     "readme": (
         "Карта памяти из README и верхнего уровня. Параметров нет.",
@@ -376,6 +385,9 @@ _MEMORY_ACTIONS = {
 }
 
 _COORD_ACTIONS = {"presence", "agents", "inbox", "send", "mark_read"}
+
+# Действия, у которых cursor — собственный параметр, а не курсор ответа.
+_OWN_CURSOR = {"changes"}
 
 
 def _canonical(action: str) -> str:
@@ -607,8 +619,9 @@ class BrainMCP:
 
     def op(self, action: str, **params: Any) -> Any:
         """Мультиплексор действий памяти, писем, присутствия и токенов."""
-        params.pop("cursor", None)
         key = _canonical(action)
+        if key not in _OWN_CURSOR:
+            params.pop("cursor", None)
         if key in _MEMORY_ACTIONS:
             method = getattr(self.service, key)
             return self._invoke(method, params)
@@ -641,7 +654,14 @@ class BrainMCP:
     def call(self, name: str, arguments: dict[str, Any] | None) -> tuple[str, bool]:
         """Вызвать инструмент; вернуть (текст, признак ошибки)."""
         args = dict(arguments or {})
-        cursor = args.pop("cursor", None)
+        # У brain_op(action="changes") cursor — свой курсор ленты изменений,
+        # поэтому продолжение длинного ответа там идёт через response_cursor.
+        own_cursor = name == "brain_op" and _canonical(args.get("action", "")) in _OWN_CURSOR
+        cursor_key = "response_cursor" if own_cursor else "cursor"
+        cursor = args.pop("response_cursor", None)
+        if not own_cursor:
+            fallback = args.pop("cursor", None)
+            cursor = cursor if cursor not in (None, "") else fallback
         try:
             if name == "brain_help":
                 result: Any = self.help(args.get("topic", ""))
@@ -667,7 +687,10 @@ class BrainMCP:
                     hint="Доступны: " + ", ".join(_TOOL_NAMES) + ".",
                 )
             text = result if isinstance(result, str) else _json(result)
-            return self._limit(text, cursor), False
+            return self._limit(text, cursor, cursor_key), False
+        except ConflictError as exc:
+            return _json({"error": f"Ошибка: {exc}", "conflict": exc.details(
+                max_diff_chars=max(200, self.max_response_chars - 1500))}), True
         except ArtekBrainError as exc:
             return f"Ошибка: {exc}", True
         except (TypeError, ValueError) as exc:
@@ -676,7 +699,7 @@ class BrainMCP:
                 True,
             )
 
-    def _limit(self, text: str, cursor: Any = None) -> str:
+    def _limit(self, text: str, cursor: Any = None, cursor_key: str = "cursor") -> str:
         """Ограничить ответ; при усечении вернуть chunk и cursor."""
         limit = self.max_response_chars
         try:
@@ -688,7 +711,7 @@ class BrainMCP:
         total = len(text)
         if start >= total:
             return _json(
-                {"truncated": True, "cursor": None, "total_chars": total, "chunk": ""}
+                {"truncated": True, cursor_key: None, "total_chars": total, "chunk": ""}
             )
 
         def build(size: int) -> str:
@@ -697,7 +720,7 @@ class BrainMCP:
             return _json(
                 {
                     "truncated": True,
-                    "cursor": str(end) if end < total else None,
+                    cursor_key: str(end) if end < total else None,
                     "total_chars": total,
                     "chunk": chunk,
                 }
@@ -755,7 +778,7 @@ def run_stdio(
 
     server = Server(
         "artek-brain",
-        version="0.2.0",
+        version=__version__,
         instructions=app.help(),
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
@@ -809,7 +832,7 @@ def _run_fallback(app: BrainMCP) -> None:  # pragma: no cover - резервны
             result: Any = {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "artek-brain", "version": "0.2.0"},
+                "serverInfo": {"name": "artek-brain", "version": __version__},
             }
         elif method == "tools/list":
             result = {"tools": app.list_tools()}
