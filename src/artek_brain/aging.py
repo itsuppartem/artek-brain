@@ -14,12 +14,13 @@ fnmatch. Выигрывает самый длинный подходящий к�
 quality.report.
 
 Модуль читает метаданные версий и журнал. Содержимое открывается только чтобы
-достать `review_by`, без записи в журнал и с кэшем по sha256.
+достать `review_by` и упоминания в заметках, без записи в журнал и с кэшем по sha256.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
@@ -112,6 +113,7 @@ def _parse(value: str | None) -> datetime | None:
 
 
 _REVIEW_CACHE: dict[str, datetime | None] = {}
+_NOTE_CACHE: dict[str, str] = {}
 
 
 def _review_by(store: Any, sha256: str | None) -> datetime | None:
@@ -137,13 +139,78 @@ def _review_by(store: Any, sha256: str | None) -> datetime | None:
     return value
 
 
-def freshness(store: Any, *, now: datetime | None = None) -> list[dict[str, Any]]:
+def _note_text(store: Any, sha256: str) -> str:
+    """Текст заметки с кэшем по sha256 (журнал чтений не засоряется)."""
+    if sha256 not in _NOTE_CACHE:
+        if len(_NOTE_CACHE) > 5000:
+            _NOTE_CACHE.clear()
+        try:
+            _NOTE_CACHE[sha256] = store._read_blob(sha256)
+        except Exception:  # noqa: BLE001 - битая заметка не должна ломать бриф
+            _NOTE_CACHE[sha256] = ""
+    return _NOTE_CACHE[sha256]
+
+
+def _mentions(text: str, path: str) -> bool:
+    """Заметка упоминает документ полным путём или именем файла."""
+    if path in text:
+        return True
+    name = path.rsplit("/", 1)[-1]
+    if "." not in name or name.lower() == "readme.md":
+        return False
+    return re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", text) is not None
+
+
+def _reviewed(store: Any) -> dict[tuple[str, int], str]:
+    rows = store._conn.execute(
+        "SELECT path, version, MAX(ts) AS ts FROM doc_reviews GROUP BY path, version"
+    ).fetchall()
+    return {(row["path"], int(row["version"])): row["ts"] for row in rows}
+
+
+def _item(
+    row: Any,
+    settings: AgingSettings,
+    moment: datetime,
+    review_by: datetime | None,
+    reviewed_at: str | None,
+) -> dict[str, Any] | None:
+    written = _parse(row["ts"])
+    if written is None:
+        return None
+    checked = _parse(reviewed_at)
+    changed = max(written, checked) if checked else written
+    ttl = settings.ttl_for(row["path"])
+    age = (moment - changed).total_seconds() / 86400
+    if review_by is not None and not (checked and checked >= review_by):
+        # Явный срок во frontmatter важнее TTL папки.
+        overdue = moment > review_by
+        overdue_days = max(0.0, (moment - review_by).total_seconds() / 86400)
+    else:
+        overdue = age > ttl
+        overdue_days = max(0.0, age - ttl)
+    return {
+        "path": row["path"],
+        "version": row["version"],
+        "ts": row["ts"],
+        "reviewed_at": reviewed_at,
+        "age_days": round(age, 1),
+        "ttl_days": ttl,
+        "overdue": overdue,
+        "overdue_days": round(overdue_days, 1),
+        "review_by": review_by.isoformat() if review_by else None,
+        "_changed": changed,
+    }
+
+
+def freshness(
+    store: Any, *, now: datetime | None = None, with_notes: bool = True
+) -> list[dict[str, Any]]:
     """Свежесть каждого живого документа по сроку.
 
-    Для каждого пути: дата последней версии, возраст, срок, просрочка,
-    сколько заметок (notes/) появилось после последней правки и сколько
-    раз документ читали. Отсортировано: сначала просроченные и самые
-    читаемые.
+    Для каждого пути: дата последней версии или подтверждения, возраст, срок,
+    просрочка, сколько заметок (notes/) с упоминанием документа появилось после
+    правки и сколько раз его читали. Сначала просроченные и самые читаемые.
     """
     settings = load_aging(store.root)
     moment = now or datetime.now(timezone.utc)
@@ -158,58 +225,81 @@ def freshness(store: Any, *, now: datetime | None = None) -> list[dict[str, Any]
             WHERE d.deleted=0
             """
         ).fetchall()
-        note_rows = store._conn.execute(
-            """
-            SELECT v.ts AS ts FROM versions v
-            JOIN documents d ON d.path=v.path
-            WHERE d.deleted=0 AND v.path LIKE 'notes/%' AND v.n=1
-            """
-        ).fetchall()
+        reviewed = _reviewed(store)
         review = {row["path"]: _review_by(store, row["sha256"]) for row in rows}
+        notes: list[tuple[datetime, str]] = []
+        if with_notes:
+            note_rows = store._conn.execute(
+                """
+                SELECT first.ts AS ts, cur.sha256 AS sha256 FROM documents d
+                JOIN versions first ON first.path=d.path AND first.n=1
+                JOIN versions cur ON cur.path=d.path AND cur.n=d.current_version
+                WHERE d.deleted=0 AND d.path LIKE 'notes/%'
+                """
+            ).fetchall()
+            for row in note_rows:
+                moment_note = _parse(row["ts"])
+                if moment_note:
+                    notes.append((moment_note, _note_text(store, row["sha256"])))
         read_rows = store._conn.execute(
             "SELECT path, COUNT(*) AS n FROM audit "
             "WHERE action='read' AND path IS NOT NULL GROUP BY path"
         ).fetchall()
-    note_times = sorted(t for t in (_parse(row["ts"]) for row in note_rows) if t)
     reads = {row["path"]: int(row["n"]) for row in read_rows}
     result: list[dict[str, Any]] = []
     for row in rows:
         path = row["path"]
-        changed = _parse(row["ts"])
-        if changed is None:
+        item = _item(
+            row, settings, moment, review.get(path), reviewed.get((path, int(row["version"] or 0)))
+        )
+        if item is None:
             continue
-        ttl = settings.ttl_for(path)
-        age = (moment - changed).total_seconds() / 86400
-        review_by = review.get(path)
-        if review_by is not None:
-            # Явный срок во frontmatter важнее TTL папки.
-            overdue = moment > review_by
-            overdue_days = max(0.0, (moment - review_by).total_seconds() / 86400)
-        else:
-            overdue = age > ttl
-            overdue_days = max(0.0, age - ttl)
-        notes_after = (
+        changed = item.pop("_changed")
+        item["notes_after"] = (
             0
             if path.startswith("notes/")
-            else sum(1 for item in note_times if item > changed)
+            else sum(1 for ts, text in notes if ts > changed and _mentions(text, path))
         )
-        result.append(
-            {
-                "path": path,
-                "version": row["version"],
-                "ts": row["ts"],
-                "age_days": round(age, 1),
-                "ttl_days": ttl,
-                "overdue": overdue,
-                "overdue_days": round(overdue_days, 1),
-                "review_by": review_by.isoformat() if review_by else None,
-                "notes_after": notes_after,
-                "reads": reads.get(path, 0),
-            }
-        )
+        item["reads"] = reads.get(path, 0)
+        result.append(item)
     result.sort(
         key=lambda item: (not item["overdue"], -item["reads"], -item["age_days"])
     )
+    return result
+
+
+def freshness_for(
+    store: Any, paths: list[str], *, now: datetime | None = None
+) -> dict[str, dict[str, Any]]:
+    """Свежесть только указанных документов: дёшево для чтения и поиска."""
+    if not paths:
+        return {}
+    settings = load_aging(store.root)
+    moment = now or datetime.now(timezone.utc)
+    marks = ",".join("?" for _ in paths)
+    with store._lock:
+        store._ensure_open()
+        rows = store._conn.execute(
+            f"""
+            SELECT d.path AS path, d.current_version AS version, v.ts AS ts,
+                   v.sha256 AS sha256
+            FROM documents d
+            JOIN versions v ON v.path=d.path AND v.n=d.current_version
+            WHERE d.deleted=0 AND d.path IN ({marks})
+            """,  # noqa: S608 - в запросе только плейсхолдеры
+            list(paths),
+        ).fetchall()
+        reviewed = _reviewed(store)
+        review = {row["path"]: _review_by(store, row["sha256"]) for row in rows}
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        item = _item(
+            row, settings, moment, review.get(row["path"]),
+            reviewed.get((row["path"], int(row["version"]))),
+        )
+        if item is not None:
+            item.pop("_changed")
+            result[row["path"]] = item
     return result
 
 
@@ -218,8 +308,8 @@ def lagging_docs(
 ) -> list[dict[str, Any]]:
     """Документы-ориентиры, после которых накопились заметки, а сами они не менялись.
 
-    Сигнал «docs отстали от notes»: выводы оседают в notes/, а справочный
-    документ остаётся прежним.
+    Сигнал «docs отстали от notes»: заметки, которые упоминают документ, вышли
+    позже его последней правки. Заметки о другом не считаются.
     """
     return [
         item

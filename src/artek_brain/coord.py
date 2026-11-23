@@ -487,7 +487,9 @@ class Coordination:
             reason=row["reason"],
         )
 
-    def brief(self, agent_name: str, *, limit: int = 3000) -> str:
+    def brief(
+        self, agent_name: str, *, limit: int = 3000, upkeep_lines: list[str] | None = None
+    ) -> str:
         """Короткий детерминированный бриф для нового агента.
 
         Где ориентир, кто сейчас работает, последние правки памяти и
@@ -537,6 +539,7 @@ class Coordination:
             + (", ".join(anchors) if anchors else "README.md и backlog.md не найдены")
             + " (доски задач нет).",
         ]
+        lines.extend(upkeep_lines or [])
         overdue = [item for item in fresh if item["overdue"]]
         lagging = {item["path"] for item in lagging_docs(fresh)}
         if overdue:

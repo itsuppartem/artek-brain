@@ -301,7 +301,24 @@ The list comes from `_MEMORY_ACTIONS` and `_COORD_ACTIONS` in `mcp_server.py`; d
 
 Aliases accepted by `brain_op`: `get` → `read`, `rollback` / `rollback-to` → `rollback_version`, `rollback_by_author`, `rollback_by_batch`, `who-knows`, `inbox_list`, `inbox_send`, `inbox_read` / `mark-read`. A `brain_` prefix on the action is ignored.
 
-Note on `changes`: through MCP, the `cursor` argument is consumed by the response limiter (it is the character offset of a cut response), so `brain_op(action="changes", cursor=N)` does not pass `N` to the feed. Use `brain changes --cursor N` or `GET /changes?cursor=N` to page the feed.
+Note on `changes`: `cursor` is the feed position. If the MCP response itself is cut, continue it with `response_cursor`.
+
+Upkeep actions:
+
+| Action | Parameters | Returns |
+|---|---|---|
+| `upkeep` | `path`, `status=open\|resolved\|confirmed\|all`, `limit` | persistent tasks for stale documents, changed decisions and rule conflicts |
+| `confirm_fresh` | `path`, `reason` (10+ chars), optional `task_id` | closes the document's tasks; without `task_id` also restarts its freshness clock |
+| `propose` | `target`, `content`, `reason` | submits a decision change for owner approval and notifies the owner |
+| `authorship` | none (owner, auditor) | counts of agent, on-request and owner-token versions |
+
+A `brain_read` of a stale document or one with open tasks includes:
+
+```json
+{"freshness": {"status": "stale", "warning": "Документ устарел: …", "age_days": 40.0, "ttl_days": 30, "tasks": [{"id": 7, "kind": "stale", "detail": "…"}], "fix": "…"}}
+```
+
+`brain_search` marks such hits with `stale: true` and `stale_reason`, and lists them in `stale_paths`. The plain CLI prints these warnings to stderr, so stdout stays the document.
 
 Quality checks are not MCP actions; `brain_help(topic="quality")` points to the CLI (`brain quality …`).
 
@@ -509,7 +526,7 @@ $ brain --json backup verify ./backups/brain-backup-20261122T090232717169Z.tar.g
 { "archive": "…", "manifest": "…", "files": 16, "documents": 6, "ok": true }
 ```
 
-Other commands: `ls`, `tree`, `blame`, `links`, `backlinks`, `changes [--cursor] [--limit]`, `export PATH [--output]`, `repack [--snapshot-every N]`, `disk-report [--days] [--forecast-days]`, `proposal list|show|approve|reject|verify`, `anomaly scan|list`, `sandbox run|status|cancel`, `serve`, `mcp`. Each has `--help`.
+Other commands: `ls`, `tree`, `blame`, `links`, `backlinks`, `changes [--cursor] [--limit]`, `export PATH [--output]`, `repack [--snapshot-every N]`, `disk-report [--days] [--forecast-days]`, `proposal submit|list|show|approve|reject|verify`, `upkeep list|sync|confirm|authorship`, `anomaly scan|list`, `sandbox run|status|cancel`, `serve`, `mcp`. Each has `--help`.
 
 ## HTTP API
 

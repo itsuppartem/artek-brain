@@ -165,6 +165,28 @@ _ACTION_HELP: dict[str, tuple[str, str, str]] = {
         "brain_write(path=\"docs/a.md\", content=\"# A\\n\", reason=\"правка\", base_version=1)",
         "Возвращает version, sha256, op, merged; при устаревшей базе — конфликт.",
     ),
+    "confirm_fresh": (
+        "Подтвердить, что устаревший документ актуален. Параметры: path, reason "
+        "(что сверил, от 10 символов), task_id (необязательно).",
+        "brain_op(action=\"confirm_fresh\", path=\"docs/prod.md\", reason=\"сверил с сервером\")",
+        "Возвращает path, version, confirmed_tasks.",
+    ),
+    "propose": (
+        "Предложить правку документа решений: её утверждает владелец. Параметры: "
+        "target, content (весь новый текст), reason.",
+        "brain_op(action=\"propose\", target=\"docs/decisions.md\", content=\"...\", reason=\"...\")",
+        "Возвращает путь предложения; владелец получает письмо.",
+    ),
+    "upkeep": (
+        "Задачи на обновление памяти. Параметры: path, status=open|resolved|confirmed|all, limit.",
+        "brain_op(action=\"upkeep\")",
+        "Возвращает items: id, path, kind, detail, status.",
+    ),
+    "authorship": (
+        "Кто писал память: агенты, правки по просьбе, токен владельца. Для owner и auditor.",
+        "brain_op(action=\"authorship\")",
+        "Возвращает счётчики по типам авторства.",
+    ),
     "search": (
         "Поиск. Параметры: query (обязателен), path_prefix, type, status, tags, "
         "author, since, until, limit, offset, history, mode=fts|semantic|hybrid.",
@@ -382,6 +404,7 @@ _MEMORY_ACTIONS = {
     "rollback_version", "rollback_author", "rollback_batch", "export",
     "audit", "stats", "who_knows", "brief", "token_create", "token_list",
     "token_revoke", "sandbox_run", "sandbox_status", "sandbox_cancel",
+    "confirm_fresh", "upkeep_list", "authorship", "propose",
 }
 
 _COORD_ACTIONS = {"presence", "agents", "inbox", "send", "mark_read"}
@@ -620,6 +643,8 @@ class BrainMCP:
     def op(self, action: str, **params: Any) -> Any:
         """Мультиплексор действий памяти, писем, присутствия и токенов."""
         key = _canonical(action)
+        if key == "upkeep":
+            key = "upkeep_list"
         if key not in _OWN_CURSOR:
             params.pop("cursor", None)
         if key in _MEMORY_ACTIONS:

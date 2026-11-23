@@ -1,6 +1,6 @@
 [project]
 name = "artek-brain"
-version = "0.2.1"
+version = "0.3.0"
 description = "Shared, versioned memory for people and AI coding agents (MCP, CLI, HTTP); no LLM in the core"
 license = "MIT"
 authors = [{ name = "Artem Gulyaev", email = "94364802+itsuppartem@users.noreply.github.com" }]

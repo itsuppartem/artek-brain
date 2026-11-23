@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Iterable, Mapping
@@ -23,6 +24,7 @@ from .review_queue import ReviewQueue
 from .registry import Registry
 from .sandbox import Sandbox, SandboxConfig, SandboxLimits
 from .store import Store
+from .upkeep import Upkeep
 
 _SANDBOX_SCHEMA = {
     "type": "object",
@@ -113,6 +115,9 @@ def _as_int(value: Any, name: str) -> int | None:
         ) from exc
 
 
+ON_BEHALF_MARK = "[по просьбе: "
+
+
 class Service:
     """Экземпляр хранилища, токенов, поиска и координации агентов."""
 
@@ -131,6 +136,7 @@ class Service:
         self.review_queue = ReviewQueue(self.store, self.access)
         self.coord = Coordination(self.store)
         self.proposals = ProposalStore(self.store, self.access)
+        self.upkeep = Upkeep(self.store, self.coord)
         self.anomalies = AnomalyDetector(
             self.store, access=self.access, coord=self.coord
         )
@@ -323,7 +329,55 @@ class Service:
             session=session,
             model=model,
         )
-        return _jsonable(result)
+        data = _jsonable(result)
+        if version is None and isinstance(data, dict):
+            self._attach_warning(token, data, session, model)
+        return data
+
+    def _sync_upkeep(self, **options: Any) -> None:
+        """Обновить задачи; сбой проверки не должен мешать работе агента."""
+        try:
+            self.upkeep.sync(**options)
+        except Exception:  # noqa: BLE001 - запись уже прошла, чтение не должно падать
+            pass
+
+    def _log_warning(
+        self,
+        actor: str | None,
+        surface: str,
+        path: str | None,
+        detail: dict[str, Any],
+        session: str | None,
+        model: str | None,
+    ) -> None:
+        """Записать показ предупреждения; журнал не должен ломать чтение."""
+        try:
+            with self.store._lock, self.store._conn:
+                self.store._audit_ok(
+                    actor, "stale_warning", path, {"surface": surface, **detail}, session, model
+                )
+        except sqlite3.Error:
+            pass
+
+    def _attach_warning(
+        self, token: str | None, data: dict[str, Any], session: str | None, model: str | None
+    ) -> None:
+        path = str(data.get("path") or "")
+        if not path:
+            return
+        self._sync_upkeep()
+        try:
+            warning = self.upkeep.warning_for(path)
+        except (sqlite3.Error, OSError, ValueError):
+            return
+        if warning is None:
+            return
+        data["freshness"] = warning
+        self._log_warning(
+            self.principal(token).name, "read", path,
+            {"status": warning["status"], "tasks": [item["id"] for item in warning["tasks"]]},
+            session, model,
+        )
 
     def write(
         self,
@@ -337,10 +391,13 @@ class Service:
         batch_id: str | None = None,
         session: str | None = None,
         model: str | None = None,
+        on_behalf: str | None = None,
     ) -> dict[str, Any]:
-        """Записать новую версию документа."""
+        """Записать новую версию; on_behalf — по чьей просьбе сделана правка."""
         from .quality import Quality
 
+        if on_behalf:
+            reason = f"{reason} {ON_BEHALF_MARK}{str(on_behalf).strip()[:60]}]"
         if token:
             Quality(self.brain).strict_check(token, path, content)
         result = self.brain.write(
@@ -355,6 +412,7 @@ class Service:
             model=model,
         )
         self.store.checkpoint_passive()
+        self._sync_upkeep()
         return _jsonable(result)
 
     def overwrite(
@@ -648,7 +706,142 @@ class Service:
                 session,
                 model,
             )
+        if not history:
+            self._annotate_search(token, data, session, model)
         return data
+
+    def _annotate_search(
+        self, token: str | None, data: dict[str, Any], session: str | None, model: str | None
+    ) -> None:
+        """Пометить устаревшие документы прямо в результатах поиска."""
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            return
+        self._sync_upkeep()
+        try:
+            marks = self.upkeep.warnings_for([str(item.get("path")) for item in items])
+        except (sqlite3.Error, OSError, ValueError):
+            return
+        if not marks:
+            return
+        for item in items:
+            mark = marks.get(str(item.get("path")))
+            if mark:
+                item["stale"] = True
+                item["stale_reason"] = mark
+        data["stale_paths"] = sorted(marks)
+        data["stale_note"] = "Часть результатов устарела: сверь факты перед опорой."
+        self._log_warning(
+            self.principal(token).name, "search", None, {"paths": sorted(marks)[:20]},
+            session, model,
+        )
+
+    # ------------------------------------------------------------------
+    # Задачи на обновление
+    # ------------------------------------------------------------------
+    def upkeep_list(
+        self,
+        token: str | None,
+        *,
+        path: str | None = None,
+        status: str = "open",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Задачи на обновление памяти."""
+        self.principal(token)
+        self._sync_upkeep()
+        normalized = self.store._normalize_path(path) if path else None
+        items = self.upkeep.tasks(
+            path=normalized, status=status, limit=_as_int(limit, "limit") or 100
+        )
+        return {"status": status, "count": len(items), "items": items}
+
+    def upkeep_sync(self, token: str | None) -> dict[str, Any]:
+        """Принудительно пересчитать задачи (только владелец)."""
+        self._require_owner(token, "upkeep_sync")
+        return self.upkeep.sync(force=True)
+
+    def confirm_fresh(
+        self,
+        token: str | None,
+        path: str,
+        reason: str,
+        *,
+        task_id: int | None = None,
+        session: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Подтвердить актуальность документа: нужно право записи и причина."""
+        normalized = self.store._normalize_path(path)
+        principal = self.brain._guard_write(token or "", "confirm_fresh", normalized)
+        return self.upkeep.confirm(
+            principal.name, normalized, reason,
+            task_id=_as_int(task_id, "task_id"), session=session, model=model,
+        )
+
+    def propose(
+        self, token: str | None, target: str, content: str, reason: str
+    ) -> dict[str, Any]:
+        """Подать правку решения на утверждение и уведомить владельца."""
+        principal = self.principal(token)
+        normalized = self.store._normalize_path(target)
+        proposal_path = f"proposals/{principal.name}/{normalized}"
+        base = None
+        with self.store._lock:
+            self.store._ensure_open()
+            doc = self.store._get_doc_locked(proposal_path)
+            if doc is not None and not doc["deleted"]:
+                base = int(doc["current_version"])
+        result = self.proposals.submit(
+            token or "", normalized, content, reason, base_version=base, target=normalized
+        )
+        owner = self.upkeep.settings.owner
+        self.coord.send(
+            owner,
+            f"Предложение к {normalized}",
+            f"{principal.name}: {reason}\nУтвердить: brain proposal approve {result.path}",
+            sender=principal.name,
+        )
+        return _jsonable(result)
+
+    def authorship(self, token: str | None) -> dict[str, Any]:
+        """Кто на деле писал память: люди, агенты и правки по просьбе владельца."""
+        principal = self.principal(token)
+        self.access.require_journal(principal, action="authorship")
+        with self.store._lock:
+            self.store._ensure_open()
+            rows = self.store._conn.execute(
+                """
+                SELECT v.author AS author, v.reason AS reason,
+                       (SELECT a.model FROM audit a WHERE a.action='write' AND a.path=v.path
+                        AND a.actor=v.author AND a.ts>=v.ts ORDER BY a.ts LIMIT 1) AS model,
+                       (SELECT a.session FROM audit a WHERE a.action='write' AND a.path=v.path
+                        AND a.actor=v.author AND a.ts>=v.ts ORDER BY a.ts LIMIT 1) AS session
+                FROM versions v
+                """
+            ).fetchall()
+            roles = {
+                str(item.get("name")): str(item.get("role"))
+                for item in _jsonable(self.access.list_tokens())
+            }
+        result = {
+            "total": len(rows), "agent": 0, "agent_on_request": 0,
+            "owner_token_setup": 0, "owner_token_by_agent": 0, "owner_token_unknown": 0,
+        }
+        for row in rows:
+            reason = str(row["reason"] or "")
+            if roles.get(str(row["author"])) in ("owner", "human"):
+                if reason.startswith("brain setup"):
+                    result["owner_token_setup"] += 1
+                elif row["model"] or row["session"]:
+                    result["owner_token_by_agent"] += 1
+                else:
+                    result["owner_token_unknown"] += 1
+            elif ON_BEHALF_MARK in reason:
+                result["agent_on_request"] += 1
+            else:
+                result["agent"] += 1
+        return result
 
     # ------------------------------------------------------------------
     # Семантика: настройка, состояние, переиндексация
@@ -1021,6 +1214,18 @@ class Service:
     # ------------------------------------------------------------------
     # Письма, присутствие и бриф
     # ------------------------------------------------------------------
+    def _brief(self, name: str, limit: int) -> str:
+        """Бриф с задачами на обновление; показ пишется в журнал."""
+        self._sync_upkeep(max_age=0)
+        try:
+            lines = self.upkeep.brief_lines()
+        except (sqlite3.Error, OSError, ValueError):
+            lines = []
+        text = self.coord.brief(name, limit=limit, upkeep_lines=lines)
+        if lines or "Проверь перед опорой" in text:
+            self._log_warning(name, "brief", None, {"lines": len(lines)}, None, None)
+        return text
+
     def coord_action(self, token: str | None, action: str, **params: Any) -> Any:
         """Мультиплексор координации: письма, присутствие, who_knows, бриф.
 
@@ -1064,9 +1269,7 @@ class Service:
         if action == "brief":
             return {
                 "agent": name,
-                "brief": self.coord.brief(
-                    name, limit=_as_int(params.get("limit"), "limit") or 2000
-                ),
+                "brief": self._brief(name, _as_int(params.get("limit"), "limit") or 2000),
             }
         raise ValidationError(
             f"Неизвестное действие «{action}».",

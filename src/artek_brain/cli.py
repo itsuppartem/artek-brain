@@ -206,6 +206,16 @@ def _print_text(command: str, data: Any) -> None:
         return
     if command == "read" and isinstance(data, dict):
         print(data.get("content", ""), end="")
+        if isinstance(data.get("freshness"), dict):
+            print(
+                f"\n[устарело] {data['freshness']['warning']} {data['freshness']['fix']}",
+                file=sys.stderr,
+            )
+        return
+    if command == "upkeep" and isinstance(data, dict) and "items" in data:
+        print(f"задач: {data.get('count', 0)}")
+        for item in data["items"]:
+            print(f"- #{item['id']} {item['path']} [{item['kind']}] {item['detail']}")
         return
     if command == "export" and isinstance(data, dict):
         print(data.get("content", ""), end="")
@@ -233,6 +243,8 @@ def _print_text(command: str, data: Any) -> None:
         print(f"Найдено: {data.get('total', len(items))}")
         for item in items:
             print(f"- {item['path']} v{item['version']} ({item['author']}) {item['title']}")
+            if item.get("stale"):
+                print(f"  [устарело] {item.get('stale_reason')}", file=sys.stderr)
             snippet = item.get("snippet") or ""
             if snippet:
                 print(f"  {snippet}")
@@ -366,10 +378,30 @@ def _parser() -> argparse.ArgumentParser:
     read.add_argument("--model", default=None)
     read.add_argument("--output", default=None, help="Записать содержимое в файл.")
 
+    upkeep = add("upkeep", "задачи на обновление памяти")
+    upkeep_sub = upkeep.add_subparsers(dest="upkeep_command", required=True)
+    upkeep_list = upkeep_sub.add_parser("list", help="показать задачи")
+    _add_common(upkeep_list)
+    upkeep_list.add_argument("--path", default=None)
+    upkeep_list.add_argument(
+        "--status", default="open", choices=("open", "resolved", "confirmed", "all")
+    )
+    upkeep_list.add_argument("--limit", type=int, default=100)
+    upkeep_sync = upkeep_sub.add_parser("sync", help="пересчитать задачи (владелец)")
+    _add_common(upkeep_sync)
+    upkeep_confirm = upkeep_sub.add_parser("confirm", help="подтвердить актуальность")
+    _add_common(upkeep_confirm)
+    upkeep_confirm.add_argument("path")
+    upkeep_confirm.add_argument("--reason", required=True)
+    upkeep_confirm.add_argument("--task", type=int, default=None)
+    upkeep_who = upkeep_sub.add_parser("authorship", help="кто писал память")
+    _add_common(upkeep_who)
+
     write = add("write", "записать документ из файла или stdin")
     write.add_argument("path")
     write.add_argument("--file", default=None, help="Файл с содержимым; - значит stdin.")
     write.add_argument("--content", default=None, help="Содержимое строкой.")
+    write.add_argument("--on-behalf", default=None, help="По чьей просьбе сделана правка.")
     write.add_argument("--reason", required=True)
     write.add_argument("--base-version", type=int, default=None)
     write.add_argument("--expected-sha256", default=None)
@@ -563,6 +595,12 @@ def _parser() -> argparse.ArgumentParser:
     proposal_list = proposal_sub.add_parser("list", help="список предложений")
     _add_common(proposal_list)
     proposal_list.add_argument("--status", default=None, choices=["pending", "approved", "rejected"])
+    proposal_submit = proposal_sub.add_parser("submit", help="предложить правку решения")
+    _add_common(proposal_submit)
+    proposal_submit.add_argument("target")
+    proposal_submit.add_argument("--file", default=None, help="Файл с текстом; - значит stdin.")
+    proposal_submit.add_argument("--content", default=None)
+    proposal_submit.add_argument("--reason", required=True)
     proposal_show = proposal_sub.add_parser("show", help="показать предложение")
     _add_common(proposal_show)
     proposal_show.add_argument("path")
@@ -821,6 +859,16 @@ def _run(args: argparse.Namespace) -> Any:
                 Path(args.output).write_text(data["content"], encoding="utf-8")
                 return {"path": args.path, "output": args.output}
             return data
+        if command == "upkeep":
+            if args.upkeep_command == "list":
+                return service.upkeep_list(
+                    token, path=args.path, status=args.status, limit=args.limit
+                )
+            if args.upkeep_command == "sync":
+                return service.upkeep_sync(token)
+            if args.upkeep_command == "authorship":
+                return service.authorship(token)
+            return service.confirm_fresh(token, args.path, args.reason, task_id=args.task)
         if command == "write":
             content = _read_content(args)
             return service.write(
@@ -828,6 +876,7 @@ def _run(args: argparse.Namespace) -> Any:
                 args.path,
                 content,
                 args.reason,
+                on_behalf=args.on_behalf,
                 base_version=args.base_version,
                 expected_sha256=args.expected_sha256,
                 batch_id=args.batch_id,
@@ -993,6 +1042,8 @@ def _run(args: argparse.Namespace) -> Any:
                 return {"path": args.path, "output": args.output}
             return data
         if command == "proposal":
+            if args.proposal_command == "submit":
+                return service.propose(token, args.target, _read_content(args), args.reason)
             return service.proposal(
                 token,
                 args.proposal_command,
