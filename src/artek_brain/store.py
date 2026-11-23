@@ -94,6 +94,47 @@ CREATE TABLE IF NOT EXISTS audit (
     model TEXT
 );
 
+CREATE TABLE IF NOT EXISTS doc_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    actor TEXT,
+    reason TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_doc_reviews_path ON doc_reviews(path, version);
+
+CREATE TABLE IF NOT EXISTS upkeep_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    doc_version INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    escalated_at TEXT,
+    resolution TEXT,
+    resolved_by TEXT,
+    note TEXT,
+    UNIQUE(path, kind, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_upkeep_status ON upkeep_tasks(status, path);
+
+CREATE TABLE IF NOT EXISTS decision_sections (
+    path TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    PRIMARY KEY(path, slug)
+);
+
+CREATE TABLE IF NOT EXISTS upkeep_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit(actor);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit(action);

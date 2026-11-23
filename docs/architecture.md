@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes how artek-brain is built, as of version 0.2.1. Every statement here points at code in `src/artek_brain/`; file and function names are given so you can check them.
+This document describes how artek-brain is built, as of version 0.3.0. Every statement here points at code in `src/artek_brain/`; file and function names are given so you can check them.
 
 - [Layers](#layers)
 - [Modules](#modules)
@@ -70,6 +70,7 @@ All 30 files in `src/artek_brain/` (about 18.8k lines including docstrings).
 | `deltas.py` | Blob container format, line deltas, snapshot policy, `repack`, `archive_old_versions` (lzma), `disk_report`, disk quota. |
 | `access.py` | Tokens (only sha256 stored), roles, scopes, TTL, revoke, suspend; protected paths, `owner/inbox` rule, Unicode look-alike normalisation for path policy. |
 | `secrets.py` | Regex secret scanner (`scan`, `assert_clean`), `redact` and `sanitize_json` for audit details. |
+| `upkeep.py` | Decision settings, section anchors and links, deterministic rule-conflict search, persistent upkeep tasks, confirmations and owner escalation. |
 | `quota.py` | `Quota` dataclass: document size, versions per document, writes per author per UTC day, optional total disk limit. |
 | `errors.py` | Error hierarchy; every error carries `message` and `hint` ("what is wrong / what to pass"). Messages are in Russian. |
 | `frontmatter.py` | Minimal YAML-like frontmatter parser and writer (scalars and `[a, b]` lists), no dependencies. |

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from .upkeep import load_settings as load_upkeep_settings
 from .access import Access, Principal, is_hidden, is_protected
 from .errors import NotFoundError, PermissionDenied, ValidationError
 
@@ -294,10 +295,10 @@ class ProposalStore:
                     "proposal_submit", target_path, principal, "owner",
                     "скрытые проверки нельзя утверждать из предложений",
                 )
-            if not is_protected(target_path) or _first_segment(target_path) not in _APPROVABLE_PREFIXES:
+            if not self._approvable(target_path):
                 raise ValidationError(
                     f"Цель утверждения «{target_path}» не в защищённой области.",
-                    hint="Укажите путь в approved/, rules/, scoring/ или owner/.",
+                    hint="Укажите документ решений или путь в approved/, rules/, scoring/, owner/.",
                 )
         else:
             target_path = self._target_for(agent, proposal_path, None)
@@ -450,10 +451,10 @@ class ProposalStore:
                 "proposal_approve", target_path, principal, "owner",
                 "скрытые проверки нельзя утверждать из предложений",
             )
-        if not is_protected(target_path) or _first_segment(target_path) not in _APPROVABLE_PREFIXES:
+        if not self._approvable(target_path):
             raise ValidationError(
                 f"Цель утверждения «{target_path}» не в защищённой области.",
-                hint="Укажите путь в approved/, rules/, scoring/ или owner/.",
+                hint="Укажите документ решений или путь в approved/, rules/, scoring/, owner/.",
             )
 
         current_target = None
@@ -562,6 +563,12 @@ class ProposalStore:
                     {"reason": reason},
                 )
         return self._row_to_proposal(self._require_proposal(normalized))
+
+    def _approvable(self, target_path: str) -> bool:
+        """Цель утверждения: защищённая область или документ решений."""
+        if load_upkeep_settings(self.store.root).is_decision(target_path):
+            return True
+        return is_protected(target_path) and _first_segment(target_path) in _APPROVABLE_PREFIXES
 
     # ------------------------------------------------------------------
     # Защита утверждённого знания

@@ -133,7 +133,9 @@ def test_ttl_settings_and_lagging(tmp_path: Path) -> None:
 
         service.write(agent, "docs/arch.md", "# Арх\n", "старт")
         for index in range(3):
-            service.write(agent, f"notes/n{index}.md", f"# Заметка {index}\n", "итог")
+            service.write(
+                agent, f"notes/n{index}.md", f"# Заметка {index}\n\nсм. docs/arch.md\n", "итог"
+            )
         later = datetime.now(timezone.utc) + timedelta(days=6)
         items = {item["path"]: item for item in freshness(service.store, now=later)}
         assert items["docs/arch.md"]["overdue"] is True
@@ -162,7 +164,7 @@ def test_brief_warns_about_stale_docs(tmp_path: Path) -> None:
                 (old,),
             )
         for index in range(4):
-            service.write(agent, f"notes/n{index}.md", f"# Итог {index}\n", "итог")
+            service.write(agent, f"notes/n{index}.md", f"# Итог {index}\n\ndocs/prod.md\n", "итог")
         brief = service.coord_action(agent, "brief")["brief"]
         assert "Ориентир: README.md" in brief
         assert "Проверь перед опорой" in brief

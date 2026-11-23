@@ -658,6 +658,7 @@ class BrainRequestHandler(BaseHTTPRequestHandler):
             "changes", "readme", "audit", "stats", "who_knows", "coord_action", "inbox",
             "brief", "token_create", "token_list", "token_revoke",
             "sandbox_run", "sandbox_status", "sandbox_cancel",
+            "confirm_fresh", "upkeep_list", "authorship", "propose",
         }
         if op not in allowed:
             raise HttpError(400, f"Неизвестная операция RPC: {op}.")

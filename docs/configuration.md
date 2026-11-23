@@ -207,6 +207,29 @@ To pass a flag from Claude Code, add it to `args` in `.mcp.json`: `"args": ["mcp
 | `--port` | `8765` | Port. |
 | `--max-body` | `1048576` | Maximum request body in bytes; larger bodies get HTTP 413. |
 
+## Decisions and upkeep
+
+```json
+{
+  "decisions": {"paths": ["docs/decisions.md"], "require_owner": true},
+  "upkeep": {
+    "escalate_days": 3,
+    "owner": "owner",
+    "rule_sources": ["backlog.md", "status.md"],
+    "exclude": ["notes/", "archive/", "proposals/", "owner/inbox/"]
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `decisions.paths` | `decisions.md`, `decisions/`, `docs/decisions.md`, `docs/decisions/` | Decision documents: exact path, folder ending in `/`, or fnmatch pattern. |
+| `decisions.require_owner` | `true` | Agents must go through a proposal. Only the JSON value `false` disables this. |
+| `upkeep.escalate_days` | `3` | Age of an open task before it is sent once to the owner's inbox. |
+| `upkeep.owner` | `owner` | Inbox recipient for escalations. |
+| `upkeep.rule_sources` | `backlog.md`, `status.md` | Extra documents treated as rule sources by the conflict search. |
+| `upkeep.exclude` | `notes/`, `archive/`, `proposals/`, `owner/inbox/` | Journal-like paths: they still show a stale warning on read, but get no persistent task. |
+
 ## Quotas
 
 The `quota` block of `settings.json` sets storage limits. Missing or invalid values keep the default; changes apply when a process opens the store.

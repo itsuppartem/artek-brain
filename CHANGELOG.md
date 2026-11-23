@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). Versions are not tagged in git; dates are those of the last commit of each version.
 
+## [0.3.0] - 2026-11-23
+
+Keeps knowledge from silently drifting. Prompted by a review of how decisions and stale facts behave in real use.
+
+### Added
+
+- **Owner-approved decisions.** Documents matching `decisions.paths` (default `decisions.md`, `decisions/`, `docs/decisions.md`, `docs/decisions/`) can be changed only by an owner or human; agents submit a proposal. This is on by default; only an explicit `decisions.require_owner: false` turns it off.
+- **Decision dependencies.** A link with an anchor (`docs/decisions.md#section`) makes a document depend on that section. When the section changes or disappears, the document gets a task.
+- **Deterministic rule-conflict search.** Compares statements in decision documents, `backlog.md` and `status.md` with other documents and reports an opposite stance or a different number on the same topic. See [what it catches and misses](docs/design-decisions.md#10-deterministic-rule-conflict-search).
+- **Upkeep tasks.** Stale documents, changed decisions and rule conflicts create a task that stays open until the document is updated or an agent confirms it with a reason (`confirm_fresh`). Tasks appear in the brief and on read, escalate once to the owner's inbox after `upkeep.escalate_days` (default 3), and never block writes.
+- **Warnings where agents read.** `brain_read`, `brain_search`, CLI and HTTP responses carry `freshness` or `stale` for affected documents. Every shown warning is written to the audit log as `stale_warning`.
+- `brain upkeep list|sync|confirm|authorship`, MCP actions `upkeep`, `confirm_fresh`, `authorship`, and `--on-behalf` for writes made at someone's request.
+
+### Changed
+
+- "Docs behind notes" counts only notes that mention the document, which removes unrelated matches.
+
+### Upgrade notes
+
+- The store gets new tables through `CREATE TABLE IF NOT EXISTS`; the schema version stays 1, so older processes keep working.
+- If agents write decisions today, set `decisions.require_owner` to `false` **before** upgrading.
+
 ## [0.2.1] - 2026-11-22
 
 Fixes for issues found while writing the architecture and usage docs.
@@ -88,6 +110,7 @@ First version. Built from the specification in `docs/TZ.md`, stage by stage (`no
 
 - The task board (tasks, claims with leases, reviews, handoffs, evidence checks, server-side runs) was built during 0.1.0 development and removed on 2026-11-12 before the version was finished; see [docs/design-decisions.md](docs/design-decisions.md#removing-the-task-board).
 
-[0.2.1]: https://github.com/itsuppartem/artek-brain/compare/d254dc8...main
+[0.3.0]: https://github.com/itsuppartem/artek-brain/compare/9eb4f5a...main
+[0.2.1]: https://github.com/itsuppartem/artek-brain/compare/d254dc8...9eb4f5a
 [0.2.0]: https://github.com/itsuppartem/artek-brain/compare/29f26f7...d254dc8
 [0.1.0]: https://github.com/itsuppartem/artek-brain/commits/29f26f7

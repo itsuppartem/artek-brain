@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Sequence
 
+from .upkeep import load_settings as load_upkeep_settings
 from .access import Access, Principal, is_hidden
 from .errors import PermissionDenied, ValidationError
 from .nav import ChangesPage, Link, Nav, Node, ReadmeMap, TocItem
@@ -108,10 +109,30 @@ class Brain:
             self.access.require_write(
                 principal, path, action=action, creating=creating
             )
+            self._guard_decision(principal, action, path)
         except PermissionDenied as exc:
             self._deny(action, path, exc)
             raise
         return principal
+
+    def _guard_decision(self, principal: Principal, action: str, path: str) -> None:
+        """Решения меняет только владелец, если это не выключено в настройках."""
+        settings = load_upkeep_settings(self.store.root)
+        if (
+            settings.require_owner
+            and settings.is_decision(path)
+            and principal.role not in ("owner", "human")
+        ):
+            raise PermissionDenied(
+                action,
+                path,
+                "owner",
+                actor=principal.name,
+                reason=(
+                    "решения утверждает владелец: подайте предложение "
+                    f'(brain_op(action="propose", target="{path}", content=…, reason=…))'
+                ),
+            )
 
     def _guard_journal(self, token: str, action: str) -> Principal:
         principal = self._verify(token, action, None)

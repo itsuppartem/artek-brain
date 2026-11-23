@@ -11,6 +11,8 @@ Short records of the main decisions: what was decided, what the alternative was,
 - [7. TTL-based aging instead of mandatory frontmatter](#7-ttl-based-aging-instead-of-mandatory-frontmatter)
 - [8. Brief injected by a hook, including after compaction](#8-brief-injected-by-a-hook-including-after-compaction)
 - [9. Removing the task board](#removing-the-task-board)
+- [10. Deterministic rule-conflict search](#10-deterministic-rule-conflict-search)
+- [11. Upkeep tasks instead of blocking writes](#11-upkeep-tasks-instead-of-blocking-writes)
 - [Trade-offs and limitations](#trade-offs-and-limitations)
 
 ## 1. No LLM inside the memory layer
@@ -113,6 +115,26 @@ Short records of the main decisions: what was decided, what the alternative was,
 **Why.** The commit records the owner's decision: agents did not take or close tasks on the board; the working reference was the backlog note. The board duplicated what a versioned `backlog.md` already provides (a list of what is being done, edited by everyone, with history and merge), while adding a second source of truth that drifted from it, plus the largest and most stateful module in the codebase. The specification was updated the same day (TZ §3.9, §6).
 
 **Cost.** No machine-enforced claims: two agents can start the same work. The mitigations are presence (`agents`), the brief's "who is working now" and recent-edits list, and section-level conflicts on `backlog.md`.
+
+## 10. Deterministic rule-conflict search
+
+**Problem.** Section merge cannot see two different sections that carry one rule: "hold the release" in one document and a deploy step in another merge cleanly while the decision has already diverged.
+
+**Decision.** Two deterministic layers. An anchored link (`docs/decisions.md#release`) is an explicit dependency: when that section changes, the linking document gets a task. A link without an anchor is navigation and creates nothing. For text without links, statements from decision documents, `backlog.md` and `status.md` are compared with other documents by shared topic words. A match is reported when the stance is opposite (hold/forbid against deploy/allow, including negation) or, for decision documents, when the wording matches and a single number differs.
+
+**What it catches.** "Hold release 0.24" against "deploy release 0.24"; "must not ship X" against "X can ship"; "deposit limit 50,000" against "deposit limit 40,000".
+
+**What it misses.** Paraphrases with no shared words, synonyms outside its small stance vocabulary, conditions and scope ("hold for client A" against "deploy for client B" may be a false alarm), rules spread over several sentences, and any meaning that needs understanding. It is a smoke detector and does not prove consistency. Explicit links are the reliable path. Statements marked as cancelled are skipped, and a confirmed false alarm stays closed until its text changes.
+
+**Alternative.** An LLM judge would catch more, but it would make the core non-deterministic, add a network dependency and make results impossible to reproduce.
+
+## 11. Upkeep tasks instead of blocking writes
+
+**Decision.** A stale document, changed decision or rule conflict opens a task. It closes only when the document gets a new version, the conflict disappears, or an agent confirms it with a written reason. Open tasks appear in the brief and on read and go once to the owner's inbox after three days.
+
+**Alternative.** Refusing writes until a task is handled would guarantee attention, but it would stop unrelated work and deploys because of an old document.
+
+**Cost.** The guarantee is that the task cannot vanish silently. It does not prove that an agent's update or confirmation is correct: the reason is recorded for audit, not verified. Journal-like paths (`notes/`, `archive/`) get a read warning but no task, because old notes are history.
 
 ## Trade-offs and limitations
 

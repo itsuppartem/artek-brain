@@ -18,6 +18,8 @@ Agents (Claude Code, opencode, Cursor) lose context between sessions and overwri
 - **Audit and metrics.** Every action is logged, searches included: who, what, when, why, from which session and client (MCP sessions from Claude Code and opencode are labelled automatically).
 - **Cheap storage.** Metadata in SQLite (WAL), content in hash-addressed blobs with dedup and compression, quotas, garbage collection, backups with sha256 manifests.
 
+- **Decisions stay in sync.** Only the owner approves decision documents by default. Documents that link to a decision section get a task when it changes, and a deterministic check flags likely contradictions in plain text. It is a heuristic and misses paraphrases.
+- **Guaranteed follow-up.** A stale or affected document gets a task that stays open until the document is updated or an agent confirms it with a reason. `brain_read`, `brain_search`, CLI and HTTP show the warning, and overdue tasks escalate to the owner without blocking work.
 - **Knowledge aging.** Every document has a freshness deadline: explicit `review_by` in frontmatter, or a TTL per folder from `settings.json` (`backlog.md` 7 days, `docs/` 30, `notes/` 90 by default). The brief and `brain quality report` flag overdue documents and "docs behind notes": reference docs that were not updated while new notes piled up after them.
 - **Agent brief and hook.** `brain_op(action="brief")` returns a short (2000 chars by default) start-of-work digest: anchors, what to double-check before relying on it, recent changes, inbox. `brain setup` installs a Claude Code `SessionStart` hook, so the brief is injected on start and again after context compaction.
 
@@ -89,7 +91,7 @@ Designed and specified by me; most of the code was written by AI coding agents (
 
 ## Status
 
-Early (0.2.1), single-tenant, self-hosted. Python 3.12+, stdlib plus minimal dependencies (`mcp` is optional).
+Early (0.3.0), single-tenant, self-hosted. Python 3.12+, stdlib plus minimal dependencies (`mcp` is optional).
 
 ## License
 
